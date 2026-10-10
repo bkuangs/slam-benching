@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slambench"
+version = "0.1.0"
+description = "Reusable SLAM experiment execution and evaluation framework"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "pyyaml>=6",
+    "psutil>=5.9",
+    "matplotlib>=3.5",
+    "evo==1.31.1",
+    "rosbags>=0.9.20",
+    "opencv-python-headless>=4.5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+slambench = "slambench.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["slambench*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,12 @@
+# Raw datasets, prepared inputs, run outputs and containers live outside the repo
+# (default: ~/scratch/slam-bench-work). Never commit them.
+*.sif
+*.db3
+*.bag
+/runs/
+/prepared/
+/datasets/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+slambench-*.out

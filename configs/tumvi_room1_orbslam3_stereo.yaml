@@ -1,0 +1,32 @@
+# Estimator installation check on a dataset ORB-SLAM3 officially supports (TUM-VI, stereo).
+# Download: https://cdn3.vision.in.tum.de/tumvi/exported/euroc/512_16/dataset-room1_512_16.tar
+name: tumvi_room1_orbslam3_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: tumvi
+  root: ~/scratch/datasets/tumvi
+  sequence: dataset-room1_512_16
+
+algorithm:
+  name: orbslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif
+  settings:
+    orb_n_features: 1000        # as in ORB-SLAM3 Examples/Stereo/TUM-VI.yaml
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false                # upstream example applies CLAHE; kept off (no preprocessing)
+    playback_rate: 1.0          # real-time throttled input
+
+execution:
+  timeout_s: 1800
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.005   # mocap 120 Hz
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

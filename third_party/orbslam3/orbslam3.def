@@ -1,0 +1,76 @@
+Bootstrap: docker
+From: ubuntu:20.04
+
+# ORB-SLAM3 pinned build for slam-benching.
+# Build with third_party/orbslam3/build_container.sh (wraps `apptainer build --fakeroot`).
+# Versions resolved inside the image are written to /opt/slambench/versions.txt.
+
+%files
+    slambench_driver.cc /opt/slambench/src/slambench_driver.cc
+    CMakeLists.driver.txt /opt/slambench/src/CMakeLists.txt
+    patches /opt/slambench/patches
+
+%environment
+    export LD_LIBRARY_PATH=/opt/ORB_SLAM3/lib:/opt/ORB_SLAM3/Thirdparty/DBoW2/lib:/opt/ORB_SLAM3/Thirdparty/g2o/lib:/usr/local/lib:${LD_LIBRARY_PATH}
+    export ORBSLAM3_VOCABULARY=/opt/ORB_SLAM3/Vocabulary/ORBvoc.txt
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    ORBSLAM3_COMMIT=4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4
+    PANGOLIN_TAG=v0.6
+    JOBS=${SLAMBENCH_BUILD_JOBS:-8}
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates pkg-config \
+        libeigen3-dev libopencv-dev libboost-serialization-dev libssl-dev \
+        libglew-dev libgl1-mesa-dev libegl1-mesa-dev libepoxy-dev libwayland-dev libxkbcommon-dev \
+        wayland-protocols python3
+    rm -rf /var/lib/apt/lists/*
+
+    mkdir -p /opt/src && cd /opt/src
+    git clone https://github.com/stevenlovegrove/Pangolin.git
+    cd Pangolin && git checkout ${PANGOLIN_TAG}
+    mkdir build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_PANGOLIN_PYTHON=OFF
+    make -j${JOBS} && make install && ldconfig
+
+    git clone https://github.com/UZ-SLAMLab/ORB_SLAM3.git /opt/ORB_SLAM3
+    cd /opt/ORB_SLAM3 && git checkout ${ORBSLAM3_COMMIT}
+    # Upstream requires OpenCV >= 4.4; Ubuntu 20.04 ships 4.2 (API-compatible for ORB-SLAM3).
+    sed -i 's/find_package(OpenCV 4.4)/find_package(OpenCV 4.2)/' CMakeLists.txt
+    for p in /opt/slambench/patches/*.patch; do git apply "$p"; done
+    git diff --stat
+
+    cd Thirdparty/DBoW2 && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j${JOBS}
+    cd /opt/ORB_SLAM3/Thirdparty/g2o && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j${JOBS}
+    cd /opt/ORB_SLAM3/Thirdparty/Sophus && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF && make -j${JOBS}
+    cd /opt/ORB_SLAM3/Vocabulary && tar -xf ORBvoc.txt.tar.gz
+    cd /opt/ORB_SLAM3 && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j${JOBS} ORB_SLAM3
+
+    cd /opt/slambench/src && mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DORBSLAM3_ROOT=/opt/ORB_SLAM3 && make -j${JOBS}
+    mkdir -p /opt/slambench/bin && cp orbslam3_driver /opt/slambench/bin/
+
+    {
+      echo "orbslam3_commit=$(git -C /opt/ORB_SLAM3 rev-parse HEAD)"
+      echo "orbslam3_local_changes=$(git -C /opt/ORB_SLAM3 diff --stat | tail -1)"
+      echo "pangolin_commit=$(git -C /opt/src/Pangolin rev-parse HEAD)"
+      echo "opencv=$(pkg-config --modversion opencv4)"
+      echo "eigen=$(pkg-config --modversion eigen3)"
+      echo "boost=$(dpkg-query -W -f='${Version}' libboost-serialization-dev)"
+      echo "gcc=$(gcc -dumpfullversion)"
+      echo "base_os=$(. /etc/os-release && echo $PRETTY_NAME)"
+    } > /opt/slambench/versions.txt
+    git -C /opt/ORB_SLAM3 diff > /opt/slambench/orbslam3_applied.diff
+    cat /opt/slambench/versions.txt
+    rm -rf /opt/src/Pangolin/build
+
+%runscript
+    exec /opt/slambench/bin/orbslam3_driver "$@"
+
+%test
+    test -x /opt/slambench/bin/orbslam3_driver
+    test -f /opt/ORB_SLAM3/Vocabulary/ORBvoc.txt
+    cat /opt/slambench/versions.txt

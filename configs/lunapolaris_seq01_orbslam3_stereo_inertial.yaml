@@ -1,0 +1,26 @@
+# Stereo-inertial on LunaPolaris. Deliberately REJECTED until verified IMU noise parameters exist:
+# LunaPolaris publishes no IMU noise densities / bias random walks. To enable, add e.g.
+#   dataset.options.imu_noise: {gyro_noise_density: ..., accel_noise_density: ...,
+#                               gyro_random_walk: ..., accel_random_walk: ...,
+#                               source: "<where these come from>", verified: true}
+name: lunapolaris_seq01_orbslam3_stereo_inertial
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_01
+  options:
+    imu_topic: /leo01/zed2/imu/data_raw
+
+algorithm:
+  name: orbslam3
+  mode: stereo_inertial
+  settings:
+    loop_closure: true
+    playback_rate: 1.0
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02

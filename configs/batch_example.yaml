@@ -1,0 +1,11 @@
+# Batch example: runs every experiment; failures/rejections still appear in the summary CSV.
+defaults:
+  output_root: ~/scratch/slam-bench-work/runs
+  work_dir: ~/scratch/slam-bench-work
+experiments:
+  - tumvi_room1_orbslam3_stereo.yaml
+  - lunapolaris_seq01_orbslam3_stereo.yaml
+  - lunapolaris_seq01_orbslam3_stereo_inertial.yaml   # expected: config_rejected (no IMU noise model)
+  - name: lunapolaris_seq01_orbslam3_lidar_rejected     # expected: config_rejected (unsupported mode)
+    dataset: {name: lunapolaris, root: ~/scratch/LunaPolaris, sequence: sequence_01}
+    algorithm: {name: orbslam3, mode: lidar_inertial}
