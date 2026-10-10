@@ -337,6 +337,19 @@ def evaluate_trajectory(est: Trajectory, gt: Trajectory, cfg: Dict[str, Any],
     ate["rotation_deg"] = (_stats(_rot_angle_deg(gt_P[:, :3, :3], est_P[:, :3, :3])) if has_rot
                            else unavailable("ground truth or estimate has no orientation"))
     res["ate"] = ate
+    if has_rot:
+        # Diagnostic only (never applied): a constant rotation between the GT-derived sensor frame
+        # and the estimated sensor frame points at a GT-body -> sensor extrinsic error.
+        Rb = Rotation.from_matrix(np.einsum("nji,njk->nik", gt_P[:, :3, :3], est_P[:, :3, :3]))
+        mb = Rb.mean()
+        resid = (mb.inv() * Rb).magnitude()
+        res["diagnostics"] = {"constant_body_rotation_offset": {
+            "angle_deg": float(np.degrees(mb.magnitude())),
+            "rotvec_deg_in_estimate_frame": np.degrees(mb.as_rotvec()).tolist(),
+            "rotation_rmse_deg_if_removed": float(np.degrees(np.sqrt(np.mean(resid ** 2)))),
+            "note": "not applied to any metric; a large constant offset with small residual indicates "
+                    "an error in the GT-body-to-sensor extrinsic rather than estimator error, and it "
+                    "also inflates translational RPE by ~delta*sin(angle)"}}
 
     # 5. evaluated coverage
     seg = segments_from(E.timestamps_ns, c["segment_max_gap_s"], diag)

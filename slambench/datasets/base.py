@@ -25,6 +25,9 @@ class DatasetAdapter(ABC):
     #: registry name used in experiment configs (``dataset.name``)
     name: str = ""
 
+    #: set True once the adapter provides LiDAR calibration and input conversion
+    supports_lidar: bool = False
+
     def __init__(self, root: Path, sequence: str, options: Optional[Dict[str, Any]] = None):
         self.root = Path(root).expanduser()
         self.sequence = sequence
@@ -74,6 +77,11 @@ class DatasetAdapter(ABC):
             return problems
         if {"cam0", "cam1"} <= REQUIRED_STREAMS[mode] and self.stereo_calibration() is None:
             problems.append("no stereo calibration available for this sequence")
+        if "lidar" in REQUIRED_STREAMS[mode]:
+            if not getattr(self, "supports_lidar", False):
+                problems.append(f"dataset adapter {self.name!r} does not implement LiDAR calibration/"
+                                "conversion yet (LiDAR modes deferred)")
+            return problems
         if mode.is_inertial:
             imu = self.imu_calibration()
             if imu is None:

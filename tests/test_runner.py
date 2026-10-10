@@ -141,3 +141,11 @@ def test_orbslam3_settings_file_for_fisheye_stereo(tmp_path):
     for key in ('Camera.type: "KannalaBrandt8"', "Camera1.k4: 0.4", "Camera2.fx", "Stereo.T_c1_c2",
                 "Camera1.overlappingBegin: 0", "Camera1.overlappingEnd: 511", "Camera2.overlappingEnd: 511"):
         assert key in text, key
+
+
+def test_lidar_modes_rejected_until_adapter_supports_them(tmp_path):
+    ds = FakeDataset(tmp_path, "s1")
+    probs = ds.validate(SensorMode.LIDAR_INERTIAL)
+    assert any("lacks streams ['lidar']" in p for p in probs)
+    ds.sequence_info = lambda: type("I", (), {"streams": {"lidar": 1, "imu": 1}})()
+    assert any("LiDAR modes deferred" in p for p in ds.validate(SensorMode.LIDAR_INERTIAL))

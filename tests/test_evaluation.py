@@ -157,3 +157,16 @@ def test_tum_roundtrip_preserves_ns(tmp_path):
     assert np.array_equal(back.timestamps_ns, gt.timestamps_ns)
     assert back.frame == "cam0"
     assert np.allclose(back.positions, gt.positions, atol=1e-9)
+
+
+def test_constant_extrinsic_rotation_offset_is_diagnosed_not_applied():
+    from scipy.spatial.transform import Rotation as R
+    from slambench.trajectory import make_T
+    gt = circle_gt()
+    off = make_T(R.from_euler("x", 3.0, degrees=True).as_matrix(), [0, 0, 0])
+    est = sample(gt, frame_times()).transformed(T_right=off)
+    r = evaluate_trajectory(est, gt, {})
+    d = r["diagnostics"]["constant_body_rotation_offset"]
+    assert d["angle_deg"] == pytest.approx(3.0, abs=1e-3)
+    assert d["rotation_rmse_deg_if_removed"] < 1e-3
+    assert r["ate"]["rotation_deg"]["rmse"] == pytest.approx(3.0, abs=1e-3)  # reported, not corrected

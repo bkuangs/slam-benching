@@ -1,0 +1,13 @@
+# Batch whose experiments must be rejected before execution (sensor/calibration incompatibility).
+# Both appear in the batch summary CSV with status config_rejected and the reasons.
+defaults:
+  output_root: ~/scratch/slam-bench-work/runs
+  work_dir: ~/scratch/slam-bench-work
+experiments:
+  - lunapolaris_seq01_orbslam3_stereo_inertial.yaml   # no verified IMU noise model in LunaPolaris
+  - name: lunapolaris_seq01_orbslam3_lidar_inertial     # ORB-SLAM3 has no LiDAR mode
+    dataset: {name: lunapolaris, root: ~/scratch/LunaPolaris, sequence: sequence_01}
+    algorithm: {name: orbslam3, mode: lidar_inertial}
+  - name: tumvi_room1_orbslam3_lidar                    # dataset has no LiDAR stream
+    dataset: {name: tumvi, root: ~/scratch/datasets/tumvi, sequence: dataset-room1_512_16}
+    algorithm: {name: orbslam3, mode: lidar}

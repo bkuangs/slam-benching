@@ -33,6 +33,12 @@ experiment config and are copied into `eval/metrics.json → settings`.
    duration (sum of segment spans) and its fraction of the input duration, fraction of input frames
    with any GT nearby.
 
+## Diagnostics (`accuracy.diagnostics`)
+* `constant_body_rotation_offset`: the mean rotation between the GT-derived and estimated sensor
+  frames, plus the rotation RMSE that would remain without it. It is never applied. A large offset
+  with a small residual points to a GT-body→sensor extrinsic error. Such an error dominates rotation
+  ATE and inflates translational RPE by about delta·sin(angle).
+
 ## Tracking coverage (`coverage`)
 From estimator tracking states (`source: estimator_tracking_state`):
 * `frame_coverage` = tracked-OK frames / input frames; `time_coverage` = time owned by OK frames /

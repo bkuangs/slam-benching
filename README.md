@@ -5,7 +5,9 @@ stereo+IMU, LiDAR+IMU) under challenging terrain, lighting and obscurants, inclu
 Existing estimators are reused unmodified (or with recorded minimal patches) behind adapters; this
 repository handles dataset adaptation, execution, output normalisation and evaluation.
 
-**Status (first milestone):** ORB-SLAM3 (pinned) × LunaPolaris, stereo mode, end to end.
+**Status (first milestone):** ORB-SLAM3 (pinned) × LunaPolaris sequence_01 runs end to end in
+stereo mode: 100 % of frames tracked and ATE RMSE 0.031 m (SE(3)). See
+`docs/results/milestone1.md` for full results and caveats.
 Stereo-inertial is implemented in the adapters but rejected for LunaPolaris until verified IMU
 noise parameters exist (see `docs/datasets/lunapolaris.md`). The estimator installation is
 verified on TUM-VI `room1`.
@@ -59,6 +61,7 @@ slambench inspect configs/lunapolaris_seq01_orbslam3_stereo.yaml   # streams, ca
 sbatch -c 8 --mem=32G -t 03:00:00 scripts/slurm_slambench.sbatch \
        run configs/lunapolaris_seq01_orbslam3_stereo.yaml           # convert (cached), run, evaluate
 sbatch scripts/slurm_slambench.sbatch batch configs/batch_example.yaml   # several configs + summary CSV
+sbatch scripts/slurm_slambench.sbatch batch configs/rejection_examples.yaml  # incompatible configs -> config_rejected
 slambench evaluate <run_dir> --set evaluation.alignment=sim3      # re-evaluate with other settings
 slambench summarize ~/scratch/slam-bench-work/runs -o summary.csv # aggregate all runs (failed ones too)
 ```

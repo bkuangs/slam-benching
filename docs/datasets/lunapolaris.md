@@ -48,6 +48,8 @@ after the bag starts; max inter-message gaps (bag time) are 2 s for images and 3
   are per-sample variances without random walk. Inertial modes are rejected until verified values
   are supplied (`dataset.options.imu_noise` with `source` and `verified: true`).
 * Camera–IMU time offset: not published.
+* ZED2 IMU timing (header stamps): on a 2.5 ms (400 Hz) grid but irregularly published, ~98 Hz on
+  average, median spacing 12.5 ms, max gap 0.64 s; `/imu/data` and `/imu/data_raw` share stamps.
 
 ## Ground truth and frames
 * OptiTrack/VRPN pose of rigid body `ZED2_camera_marker`, position + orientation, metres.
@@ -58,7 +60,10 @@ after the bag starts; max inter-message gaps (bag time) are 2 s for images and 3
 * `/tf_static` connects `vrpn_mocap/ZED2_camera_marker` → `leo01/base_footprint` → … →
   `zed2_left_camera_optical_frame`. Lever arm marker → left optical: 0.070 m. The chain is
   internally consistent (marker vs. `optitrack_marker_link` differ by 0.4 mm / 0.008°), but these
-  are nominal URDF values, not a hand–eye calibration.
+  are nominal URDF values, not a hand–eye calibration. The ORB-SLAM3 stereo run on sequence_01
+  shows a near-constant 4.1° rotation (mostly about the camera x-axis) between the estimated and the
+  GT-derived camera frame, so the nominal camera tilt is likely off by about this amount. It is
+  reported as a diagnostic and not corrected (see docs/results/milestone1.md).
 * GT never enters estimator inputs; the evaluator converts it to the estimate frame.
 
 ## Conversion to the slambench offline format (`prepare_offline`)
