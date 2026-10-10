@@ -1,0 +1,15 @@
+diff --git a/src/Settings.cc b/src/Settings.cc
+index 93a50be..92d4bb2 100644
+--- a/src/Settings.cc
++++ b/src/Settings.cc
+@@ -550,7 +550,9 @@ namespace ORB_SLAM3 {
+             output << " ]" << endl;
+         }
+ 
+-        if(settings.sensor_ == System::STEREO || settings.sensor_ == System::IMU_STEREO){
++        // slam-benching patch: originalCalib2_ is never set for Rectified stereo (upstream bug, segfault).
++        if((settings.sensor_ == System::STEREO || settings.sensor_ == System::IMU_STEREO) &&
++           settings.cameraType_ != Settings::Rectified){
+             output << "\t-Camera 2 parameters (";
+             if(settings.cameraType_ == Settings::PinHole || settings.cameraType_ ==  Settings::Rectified){
+                 output << "Pinhole";
