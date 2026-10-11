@@ -65,6 +65,10 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "pinhole_height": 480,
     "pinhole_focal": None,        # px, fx = fy; None -> mean(gamma1, gamma2) / (1 + xi)
     "interpolation": "linear",    # linear | cubic
+    # Rows removed from the bottom of the pinhole image (preprocessing, off by default). The RC7
+    # handheld payload sees its own car body and self-cast shadow there; they are static in the
+    # image and attract features. Cropping keeps an exact pinhole model (fx, fy, cx, cy unchanged).
+    "crop_bottom_px": 0,
     "imu_noise": None,            # dict(ImuNoise fields) with source + verified
     "time_offset_s": 0.0,         # t_imu = t_cam + offset (hardware synchronised)
 }
@@ -111,7 +115,8 @@ def _sha1(path: Path) -> str:
 class SubtMrsAdapter(DatasetAdapter):
     name = "subtmrs"
     adapter_version = "1"
-    input_affecting_options = ("pinhole_width", "pinhole_height", "pinhole_focal", "interpolation")
+    input_affecting_options = ("pinhole_width", "pinhole_height", "pinhole_focal", "interpolation",
+                               "crop_bottom_px")
 
     def __init__(self, root, sequence, options=None):
         merged = dict(DEFAULT_OPTIONS)
@@ -119,6 +124,9 @@ class SubtMrsAdapter(DatasetAdapter):
         super().__init__(root, sequence, merged)
         if self.options["interpolation"] not in ("linear", "cubic"):
             raise ValueError("subtmrs: interpolation must be 'linear' or 'cubic'")
+        crop = self.options["crop_bottom_px"]
+        if not isinstance(crop, int) or not 0 <= crop < int(self.options["pinhole_height"]):
+            raise ValueError("subtmrs: crop_bottom_px must be an integer in [0, pinhole_height)")
 
     # ---- paths -------------------------------------------------------------
     @property
@@ -217,7 +225,9 @@ class SubtMrsAdapter(DatasetAdapter):
     def stereo_calibration(self) -> Optional[StereoCalibration]:
         w, h = int(self.options["pinhole_width"]), int(self.options["pinhole_height"])
         f = self.pinhole_focal()
-        left = CameraIntrinsics("pinhole", w, h, f, f, (w - 1) / 2.0, (h - 1) / 2.0, [0.0, 0.0, 0.0, 0.0],
+        # The principal point stays at the centre of the uncropped virtual image.
+        left = CameraIntrinsics("pinhole", w, h - int(self.options["crop_bottom_px"]), f, f,
+                                (w - 1) / 2.0, (h - 1) / 2.0, [0.0, 0.0, 0.0, 0.0],
                                 rectified=True, frame_id="cam0")
         return StereoCalibration(left, None, np.eye(4), 0.0,
                                  source=f"virtual pinhole resampled from MEI model in "
@@ -281,7 +291,9 @@ class SubtMrsAdapter(DatasetAdapter):
         cam = self.stereo_calibration().left
         mei = self.mei_params()
         src_w, src_h = self.source_image_size()
-        map_x, map_y = pinhole_to_mei_maps(mei, cam.width, cam.height, cam.fx)
+        full_h = int(self.options["pinhole_height"])
+        map_x, map_y = pinhole_to_mei_maps(mei, cam.width, full_h, cam.fx)
+        map_x, map_y = map_x[:cam.height], map_y[:cam.height]
         inside = (map_x >= 0) & (map_x <= src_w - 1) & (map_y >= 0) & (map_y <= src_h - 1)
         interp = {"linear": cv2.INTER_LINEAR, "cubic": cv2.INTER_CUBIC}[self.options["interpolation"]]
         mx, my = np.nan_to_num(map_x, nan=-1.0), np.nan_to_num(map_y, nan=-1.0)
@@ -342,7 +354,8 @@ class SubtMrsAdapter(DatasetAdapter):
             "frame_dt_s": {"median": float(np.median(dt)), "max": float(dt.max())} if len(dt) else {},
             "timestamps": "original cam_0/timestamps.txt and imu_data.csv nanosecond stamps (unchanged)",
             "source_image_shapes": sorted(str(s) for s in shapes),
-            "images": (f"MEI {src_w}x{src_h} -> virtual pinhole {cam.width}x{cam.height}, "
+            "images": (f"MEI {src_w}x{src_h} -> virtual pinhole {cam.width}x{full_h}, "
+                       f"bottom {full_h - cam.height} rows cropped -> {cam.width}x{cam.height}, "
                        f"fx=fy={cam.fx:.6g}, cx={cam.cx}, cy={cam.cy}, zero distortion, same camera "
                        f"orientation; cv2.remap {self.options['interpolation']}, out-of-image pixels black; "
                        "colour order unchanged (BGR as read by OpenCV)"),
@@ -350,6 +363,7 @@ class SubtMrsAdapter(DatasetAdapter):
             "mei_parameters": mei,
             "pinhole_valid_pixel_fraction": float(inside.mean()),
             "imu_columns_used": "ang_vel_xyz (rad/s), lin_acc_xyz (m/s^2); orientation quaternion ignored",
-            "preprocessing": [],
+            "preprocessing": ([f"crop_bottom_{self.options['crop_bottom_px']}px (self-occlusion: car body "
+                               "and self-cast shadow)"] if self.options["crop_bottom_px"] else []),
         }
         return PreparedInput(out_dir, mode, n, n_imu, manifest)

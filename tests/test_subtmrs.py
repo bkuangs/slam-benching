@@ -242,3 +242,20 @@ def test_stereo_rejected_by_runner(seq_root, tmp_path):
     d = runner.run_experiment(validate_config(deep_merge(DEFAULTS, cfg)), log=lambda *_: None)
     st = json.loads((d / "status.json").read_text())
     assert st["status"] == "config_rejected" and "cam1" in st["message"]
+
+
+def test_crop_bottom_keeps_pinhole_geometry(seq_root, tmp_path):
+    with pytest.raises(ValueError):
+        SubtMrsAdapter(seq_root, SEQ, {"crop_bottom_px": 480})
+    full = SubtMrsAdapter(seq_root, SEQ).stereo_calibration().left
+    ds = SubtMrsAdapter(seq_root, SEQ, {"crop_bottom_px": 140})
+    c = ds.stereo_calibration().left
+    assert (c.width, c.height) == (640, 340)
+    assert (c.fx, c.fy, c.cx, c.cy) == (full.fx, full.fy, full.cx, full.cy)
+    prep = ds.prepare_cached(SensorMode.MONO, tmp_path / "cache")
+    assert prep.manifest["preprocessing"][0].startswith("crop_bottom_140px")
+    img = cv2.imread(str(prep.directory / "cam0" / "0.png"), cv2.IMREAD_GRAYSCALE)
+    assert img.shape == (340, 640)
+    vs, us = np.nonzero(img > 128)
+    expected = [c.fx * POINT[0] / POINT[2] + c.cx, c.fy * POINT[1] / POINT[2] + c.cy]
+    assert np.allclose([us.mean(), vs.mean()], expected, atol=1.0)

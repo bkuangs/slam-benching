@@ -13,6 +13,9 @@ dataset:
     pinhole_width: 640
     pinhole_height: 480
     pinhole_focal: null                    # null -> mean(gamma1, gamma2)/(1+xi) ~= 277.8 px (98x82 deg FOV)
+    # Preprocessing: drop the rows showing the RC car body + self-cast shadow (static in the image;
+    # edge-persistence analysis puts them below row ~345). Without it ORB-SLAM3 tracks the car body.
+    crop_bottom_px: 140
 
 algorithm:
   name: orbslam3

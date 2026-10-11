@@ -14,6 +14,7 @@ dataset:
   sequence: SubT_MRS_Hawkins_Smoke_Handheld
   options:
     time_offset_s: 0.0           # hardware synchronised (<= 3 ms per dataset hardware notes)
+    crop_bottom_px: 140          # car body + self-cast shadow (see mono config)
 
 algorithm:
   name: orbslam3

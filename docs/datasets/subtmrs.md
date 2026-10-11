@@ -46,8 +46,13 @@ The release has only **one RGB camera**, so stereo modes are rejected. The IMU q
 hold an on-board orientation estimate and are ignored. The thermal camera is not yet an estimator
 stream: it would need a 16→8-bit conversion, which is preprocessing, and its published extrinsic
 has a bottom row of zeros.
-The RGB image shows part of the platform at the bottom and dark vignetting near the border.
-The adapter does not mask either.
+The RGB image shows the RC car body and the shadow it casts with its own light at the bottom of
+every frame. Both are static in the image. Option `crop_bottom_px` (default 0, recorded under
+`preprocessing`) removes those rows from the pinhole image. fx, fy, cx and cy stay unchanged, so
+the model is still exact. Edge persistence over 355 frames puts the car outline and shadow below
+row ~345 of the 640x480 virtual image, so the SmokeRoom configs use `crop_bottom_px: 140` (640x340).
+Without the crop, ORB-SLAM3 mono reported 72 % of frames as tracked but estimated almost no
+motion (Sim(3) scale 61.8, ATE RMSE 7.3 m; run `20261010-225344_2e6404`).
 
 ## Camera model → virtual pinhole
 `rgb_camera` uses the MEI unified omnidirectional model (`xi = 1.583`, radial-tangential
