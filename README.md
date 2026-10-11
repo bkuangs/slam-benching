@@ -94,12 +94,16 @@ explicit setting recorded in every summary row; keep it constant within a compar
 ### What a run directory contains
 `config.resolved.yaml`, `environment.json` (git commit + diff, packages, host, Slurm job,
 container sha256 and library versions), `dataset_info.json`, `prepared_input.json`,
-`command.txt`, `stdout.log`, `stderr.log`, `status.json` (status, return code, wall time, peak
-RSS, CPU time), `algorithm/` (native config + raw outputs), `trajectory.tum`,
+`command.txt`, `stdout.log`, `stderr.log`, `status.json` (status, stage, estimator outcome,
+return code, wall time, peak RSS, CPU time; written from the start), `error.json` (harness
+failures), `algorithm/` (native config + raw outputs), `trajectory.tum` (final),
+`trajectory_online.tum` (pose available at each frame),
 `frame_diagnostics.csv`, `eval/metrics.json`, `eval/trajectory.png`,
 `eval/error_and_tracking.png`, `summary.csv`. Status values: `success`, `config_rejected`,
-`prepare_failed`, `init_failure`, `crash`, `timeout`, `missing_output`; evaluation problems are
-reported separately in `eval_status`.
+`prepare_failed`, `init_failure`, `crash`, `timeout`, `missing_output` (estimator outcomes), plus
+`collect_failed` and `harness_error` (slambench-side failures); evaluation problems are reported
+separately in `eval_status`. Online and final trajectories are evaluated separately
+(`online_*` / `final_*` summary columns; see `docs/evaluation.md`).
 
 ## Documentation
 * `docs/adapter_interface.md` — dataset/algorithm adapter contracts, offline input format,

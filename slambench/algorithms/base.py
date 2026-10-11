@@ -39,16 +39,90 @@ class RunContext:
     settings: Dict[str, Any]          # resolved algorithm settings
 
 
+#: Trajectory kinds the evaluator knows about.
+TRAJECTORY_KINDS = ("online", "final")
+
+
+@dataclass
+class TrajectoryOutput:
+    """One normalized trajectory produced by a run.
+
+    kind
+        ``online``: the pose the estimator emitted right after processing each frame (what a
+        vehicle would have used at that moment; it may already include earlier loop closures).
+        ``final``: poses exported after shutdown, including all later optimization.
+    frame
+        Logical sensor frame of the poses ("cam0", "imu"); each trajectory may differ.
+    coordinate_sessions
+        ``single``: all poses share one world frame.
+        ``map_id``: each pose is expressed in the frame of the estimator map that was active when
+        it was emitted (frame_diagnostics map_id); maps are evaluated as independent sessions.
+    """
+    kind: str
+    path: Path
+    frame: str
+    description: str = ""
+    coordinate_sessions: str = "single"
+    keyframe_only: bool = False
+
+    def __post_init__(self):
+        if self.kind not in TRAJECTORY_KINDS:
+            raise ValueError(f"trajectory kind must be one of {TRAJECTORY_KINDS}, not {self.kind!r}")
+        if self.coordinate_sessions not in ("single", "map_id"):
+            raise ValueError("coordinate_sessions must be 'single' or 'map_id'")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "path": str(self.path), "frame": self.frame,
+                "description": self.description, "coordinate_sessions": self.coordinate_sessions,
+                "keyframe_only": self.keyframe_only}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TrajectoryOutput":
+        return cls(d["kind"], Path(d["path"]), d["frame"], d.get("description", ""),
+                   d.get("coordinate_sessions", "single"), bool(d.get("keyframe_only", False)))
+
+
 @dataclass
 class AlgorithmOutput:
     status: RunStatus
     message: str = ""
-    trajectory: Optional[Path] = None          # normalized TUM file (see slambench.trajectory)
-    estimate_frame: str = ""                   # logical sensor frame of trajectory poses
+    trajectory: Optional[Path] = None          # legacy: single (final) normalized TUM file
+    estimate_frame: str = ""                   # legacy: sensor frame of `trajectory`
     frame_diagnostics: Optional[Path] = None   # normalized CSV, FRAME_DIAGNOSTICS_COLUMNS
     diagnostics_available: Dict[str, bool] = field(default_factory=dict)
     keyframe_only: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
+    trajectories: List[TrajectoryOutput] = field(default_factory=list)
+
+    def all_trajectories(self) -> List[TrajectoryOutput]:
+        """Declared trajectories; a legacy `trajectory` counts as the final trajectory."""
+        out = list(self.trajectories)
+        if self.trajectory is not None and not any(t.kind == "final" for t in out):
+            out.append(TrajectoryOutput("final", Path(self.trajectory), self.estimate_frame,
+                                        "estimator output trajectory", "single", self.keyframe_only))
+        return out
+
+    def to_dict(self) -> Dict[str, Any]:
+        trajs = self.all_trajectories()
+        final = next((t for t in trajs if t.kind == "final"), None)
+        return {"status": self.status.value, "message": self.message,
+                "trajectories": [t.to_dict() for t in trajs],
+                # legacy keys (final trajectory) kept for older tools
+                "trajectory": str(final.path) if final else None,
+                "estimate_frame": final.frame if final else self.estimate_frame,
+                "frame_diagnostics": str(self.frame_diagnostics) if self.frame_diagnostics else None,
+                "diagnostics_available": self.diagnostics_available,
+                "keyframe_only": self.keyframe_only, "extra": self.extra}
+
+
+def trajectories_from_output_json(d: Dict[str, Any]) -> List[TrajectoryOutput]:
+    """Trajectories listed in algorithm_output.json (also reads files written before `trajectories`)."""
+    if d.get("trajectories") is not None:
+        return [TrajectoryOutput.from_dict(t) for t in d["trajectories"]]
+    if d.get("trajectory"):
+        return [TrajectoryOutput("final", Path(d["trajectory"]), d.get("estimate_frame", ""),
+                                 "estimator output trajectory", "single", bool(d.get("keyframe_only")))]
+    return []
 
 
 class AlgorithmAdapter(ABC):
@@ -73,7 +147,7 @@ class AlgorithmAdapter(ABC):
 
     @abstractmethod
     def estimate_frame(self, mode: SensorMode) -> str:
-        """Logical sensor frame ("cam0", "imu", ...) of the normalized trajectory poses."""
+        """Logical sensor frame ("cam0", "imu", ...) of the normalized final trajectory poses."""
 
     @abstractmethod
     def version_info(self) -> Dict[str, Any]:

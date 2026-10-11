@@ -222,6 +222,7 @@ def test_runner_end_to_end_mono(seq_root, tmp_path, monkeypatch):
            "algorithm": {"name": "mono_from_gt", "mode": "mono"},
            "execution": {"timeout_s": 60, "memory_poll_s": 0.05},
            "evaluation": {"plots": False, "alignment": "sim3", "association_max_dt_s": 0.005,
+                          "session_min_matched": 3,
                           "rpe": [{"delta": 1, "unit": "frames"}]}}
     d = runner.run_experiment(validate_config(deep_merge(DEFAULTS, cfg)), log=lambda *_: None)
     st = json.loads((d / "status.json").read_text())
@@ -229,16 +230,17 @@ def test_runner_end_to_end_mono(seq_root, tmp_path, monkeypatch):
     info = json.loads((d / "dataset_info.json").read_text())
     assert info["stereo_calibration"]["right"] is None
     m = json.loads((d / "eval" / "metrics.json").read_text())
-    ate = m["accuracy"]["ate"]
-    assert m["accuracy"]["association"]["n_matched"] == N_FRAMES
-    assert m["accuracy"]["ground_truth"]["body_frame"] == "imu"
+    ate = m["accuracy"]["final"]["ate"]
+    assert m["accuracy"]["final"]["association"]["n_matched"] == N_FRAMES
+    assert m["accuracy"]["final"]["ground_truth"]["body_frame"] == "imu"
     assert ate["translation_m"]["rmse"] < 1e-6 and ate["rotation_deg"]["rmse"] < 1e-4
 
 
 def test_stereo_rejected_by_runner(seq_root, tmp_path):
     cfg = {"name": "smoke_stereo", "output_root": str(tmp_path / "runs"), "work_dir": str(tmp_path / "work"),
            "dataset": {"name": "subtmrs", "root": str(seq_root), "sequence": SEQ},
-           "algorithm": {"name": "orbslam3", "mode": "stereo"}}
+           "algorithm": {"name": "orbslam3", "mode": "stereo",
+                         "options": {"container": str(tmp_path / "missing.sif")}}}
     d = runner.run_experiment(validate_config(deep_merge(DEFAULTS, cfg)), log=lambda *_: None)
     st = json.loads((d / "status.json").read_text())
     assert st["status"] == "config_rejected" and "cam1" in st["message"]
@@ -259,3 +261,44 @@ def test_crop_bottom_keeps_pinhole_geometry(seq_root, tmp_path):
     vs, us = np.nonzero(img > 128)
     expected = [c.fx * POINT[0] / POINT[2] + c.cx, c.fy * POINT[1] / POINT[2] + c.cy]
     assert np.allclose([us.mean(), vs.mean()], expected, atol=1.0)
+
+
+def test_changed_source_data_invalidates_prepared_cache(seq_root, tmp_path):
+    import shutil
+    cache = tmp_path / "cache"
+    first = SubtMrsAdapter(seq_root, SEQ).prepare_cached(SensorMode.MONO_INERTIAL, cache)
+    assert first.manifest["preparation_inputs"]["dataset_root"] == str(seq_root.resolve())
+    assert SubtMrsAdapter(seq_root, SEQ).prepare_cached(SensorMode.MONO_INERTIAL, cache).directory == first.directory
+
+    imu = seq_root / SEQ / "SmokeRoom_Folder" / "imu" / "imu_data.csv"
+    imu.write_text(imu.read_text().replace(",9.81\n", ",9.80\n"))
+    second = SubtMrsAdapter(seq_root, SEQ).prepare_cached(SensorMode.MONO_INERTIAL, cache)
+    assert second.directory != first.directory
+    assert np.loadtxt(second.imu_csv, delimiter=",", skiprows=1)[0, 6] == pytest.approx(9.80)
+
+    img = seq_root / SEQ / "SmokeRoom_Folder" / "cam_0" / "2.png"
+    cv2.imwrite(str(img), np.full((480, 640, 3), 7, np.uint8))
+    third = SubtMrsAdapter(seq_root, SEQ).prepare_cached(SensorMode.MONO_INERTIAL, cache)
+    assert third.directory not in (first.directory, second.directory)
+
+    calib = seq_root / SEQ / f"{SEQ}_Intrinsics.yaml"
+    calib.write_text(calib.read_text().replace("xi: 1.583106303248484", "xi: 1.5"))
+    fourth = SubtMrsAdapter(seq_root, SEQ).prepare_cached(SensorMode.MONO_INERTIAL, cache)
+    assert fourth.directory not in (first.directory, second.directory, third.directory)
+
+    # An identical copy of the sequence under another root is prepared separately.
+    other = tmp_path / "copy"
+    shutil.copytree(seq_root / SEQ, other / SEQ)
+    assert SubtMrsAdapter(other, SEQ).preparation_key(SensorMode.MONO_INERTIAL) != \
+        SubtMrsAdapter(seq_root, SEQ).preparation_key(SensorMode.MONO_INERTIAL)
+
+
+def test_nonzero_imu_time_offset_is_rejected(seq_root):
+    noise = dict(gyro_noise_density=1e-4, accel_noise_density=1e-3, gyro_random_walk=1e-6,
+                 accel_random_walk=1e-5, source="test", verified=True)
+    ok = SubtMrsAdapter(seq_root, SEQ, {"imu_noise": noise})
+    assert ok.validate(SensorMode.MONO_INERTIAL) == []
+    shifted = SubtMrsAdapter(seq_root, SEQ, {"imu_noise": noise, "time_offset_s": 0.004})
+    probs = shifted.validate(SensorMode.MONO_INERTIAL)
+    assert len(probs) == 1 and "time offset 0.004" in probs[0] and "not apply" in probs[0]
+    assert shifted.validate(SensorMode.MONO) == []

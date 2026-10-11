@@ -275,10 +275,9 @@ class SubtMrsAdapter(DatasetAdapter):
         return None
 
     # ---- input preparation ---------------------------------------------------
-    def preparation_key(self, mode: SensorMode) -> str:
-        base = super().preparation_key(mode)
-        calib = _sha1(self._path("intrinsics_yaml"))
-        return hashlib.sha1(f"{base}:{calib}".encode()).hexdigest()[:12]
+    def source_files(self):
+        return [self.data_dir / "cam_0", self.data_dir / "imu" / "imu_data.csv",
+                self._path("intrinsics_yaml")]
 
     def prepare_offline(self, mode: SensorMode, out_dir: Path) -> PreparedInput:
         import cv2

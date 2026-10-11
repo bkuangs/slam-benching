@@ -10,6 +10,36 @@ experiment config and are copied into `eval/metrics.json → settings`.
 | `segment_max_gap_s` | 0.5 | consecutive matched samples farther apart start a new segment |
 | `rpe` | `[{delta: 1, unit: m}, {delta: 1, unit: s}]` | RPE intervals; units `m` (GT path length), `s`, `frames` |
 | `valid_states` | `tracking_ok` | evaluate only poses from frames the estimator reports as tracked OK (`all_output` to disable) |
+| `session_min_matched` | 20 | map sessions with fewer matched samples are listed but not pooled (their alignment would overfit) |
+
+## Online and final trajectories
+A run can declare two trajectories (`algorithm_output.json → trajectories`), and each is evaluated
+separately in its own sensor frame (`accuracy.online`, `accuracy.final`):
+
+| kind | file | question it answers |
+|---|---|---|
+| `online` | `trajectory_online.tum` | How accurate was the pose available when this image was processed? |
+| `final` | `trajectory.tum` | How accurate is the reconstruction after later mapping and loop-closure corrections? |
+
+* ORB-SLAM3 `online` = the camera pose returned by `Track*()` right after each tracking-OK frame
+  (`frame_log.csv`, original timestamps; `cam0` frame in every mode). It already contains loop
+  closures that happened *before* that frame, never later ones, so it is not pure odometry.
+  `final` = `SaveTrajectoryEuRoC` after shutdown (`imu` frame in inertial modes, largest map only).
+  The two therefore use different GT-body→sensor transforms.
+* **Map sessions.** Online poses are expressed in the map that was active when they were emitted
+  (`coordinate_sessions: map_id`). Maps have independent world frames, so each map is a session that
+  is associated, aligned and scored on its own. Nothing is concatenated under one alignment, and RPE
+  never pairs samples from different maps. `accuracy.<kind>.sessions[]` lists each session (map id,
+  poses, span, fraction of the input duration, its own alignment and metrics). The top-level ATE/RPE
+  pool the per-sample/per-pair errors of sessions with at least `session_min_matched` matches.
+  `final` uses one session (`coordinate_sessions: single`).
+* **Failed runs.** Evaluation also runs for crashed or timed-out runs: the online prefix written
+  before a crash is scored while the run keeps its failed status (`final` is then unavailable).
+* **Label.** All accuracy numbers are *aligned benchmark accuracy*: the alignment is fitted over
+  each whole session with all of its ground truth, including samples after a pose was emitted. They
+  describe trajectory consistency, not the causal error a vehicle saw at that instant.
+* Summary columns are prefixed `online_` / `final_`; RPE columns are named by interval, e.g.
+  `online_rpe_1s_trans_rmse_m`, `final_rpe_1m_rot_rmse_deg`.
 
 ## Pipeline
 1. **Frames.** Ground truth gives the pose of the GT body (e.g. mocap marker) in the mocap world.
@@ -64,4 +94,6 @@ as completion.
 ## Not implemented / reported as unavailable
 * Orientation metrics with position-only GT.
 * Camera–mocap time-offset estimation (none is applied; LunaPolaris publishes none).
+* Camera–IMU time offsets: a configured non-zero offset is rejected (not applied to inputs yet).
+* Causal (un-aligned / prefix-aligned) online error; online accuracy is aligned benchmark accuracy.
 * Per-frame time for estimators that do not expose it.

@@ -42,8 +42,13 @@ DEFAULT_EVAL: Dict[str, Any] = {
     "segment_max_gap_s": 0.5,
     "rpe": [{"delta": 1.0, "unit": "m"}, {"delta": 1.0, "unit": "s"}],
     "valid_states": "tracking_ok",      # tracking_ok | all_output
+    "session_min_matched": 20,          # map sessions with fewer matched samples are not pooled
     "plots": True,
 }
+
+ACCURACY_LABEL = ("aligned benchmark accuracy: the alignment is fitted over each whole coordinate "
+                  "session using all of its ground truth, including samples after each pose was "
+                  "emitted; it measures trajectory shape/consistency, not a causal real-time error")
 
 
 def unavailable(reason: str) -> Dict[str, Any]:
@@ -255,12 +260,16 @@ def rpe(est_P: np.ndarray, gt_P: np.ndarray, est_pos: np.ndarray, gt_pos: np.nda
         Eg = np.linalg.inv(gt_P[i]) @ gt_P[j]
         Ee = np.linalg.inv(est_P[i]) @ est_P[j]
         E = np.linalg.inv(Eg) @ Ee
-        out["translation_m"] = _stats(np.linalg.norm(E[:, :3, 3], axis=1))
-        out["rotation_deg"] = _stats(np.degrees(np.linalg.norm(Rotation.from_matrix(E[:, :3, :3]).as_rotvec(), axis=1)))
+        te = np.linalg.norm(E[:, :3, 3], axis=1)
+        re = np.degrees(np.linalg.norm(Rotation.from_matrix(E[:, :3, :3]).as_rotvec(), axis=1))
+        out["translation_m"] = _stats(te)
+        out["rotation_deg"] = _stats(re)
+        out["_trans_err"], out["_rot_err"] = te, re
         out["frame"] = "relative motion expressed in the frame of sample i"
     else:
         e = (est_pos[j] - est_pos[i]) - (gt_pos[j] - gt_pos[i])
-        out["translation_m"] = _stats(np.linalg.norm(e, axis=1))
+        out["_trans_err"] = np.linalg.norm(e, axis=1)
+        out["translation_m"] = _stats(out["_trans_err"])
         out["rotation_deg"] = unavailable("ground truth or estimate has no orientation")
         out["frame"] = "displacement difference in the aligned world frame (position-only variant)"
     return out
@@ -334,7 +343,8 @@ def evaluate_trajectory(est: Trajectory, gt: Trajectory, cfg: Dict[str, Any],
     # 4. ATE
     trans_err = np.linalg.norm(est_pos - G.positions, axis=1)
     ate = {"translation_m": _stats(trans_err), "unit": "m"}
-    ate["rotation_deg"] = (_stats(_rot_angle_deg(gt_P[:, :3, :3], est_P[:, :3, :3])) if has_rot
+    rot_err = _rot_angle_deg(gt_P[:, :3, :3], est_P[:, :3, :3]) if has_rot else None
+    ate["rotation_deg"] = (_stats(rot_err) if has_rot
                            else unavailable("ground truth or estimate has no orientation"))
     res["ate"] = ate
     if has_rot:
@@ -372,7 +382,141 @@ def evaluate_trajectory(est: Trajectory, gt: Trajectory, cfg: Dict[str, Any],
     res["rpe"] = [rpe(est_P, gt_P, est_pos, G.positions, E.timestamps_ns, seg, float(r["delta"]),
                       r["unit"], has_rot) for r in c["rpe"]]
     res["_series"] = {"t_ns": E.timestamps_ns, "est_pos": est_pos, "gt_pos": G.positions,
-                      "trans_err": trans_err, "segment": seg}
+                      "trans_err": trans_err, "rot_err": rot_err, "segment": seg}
+    return res
+
+
+# ----------------------------------------------------------------------------
+# coordinate sessions (independent map frames)
+# ----------------------------------------------------------------------------
+def split_sessions(traj: Trajectory, coordinate_sessions: str, diag: Optional[FrameDiagnostics]):
+    """[(map_id or None, sample indices)] in order of first appearance, plus a note.
+
+    ``map_id``: every pose belongs to the session of the estimator map active when it was emitted;
+    each map has its own world frame, so sessions are aligned and scored independently and RPE
+    never pairs samples from different maps.
+    """
+    if coordinate_sessions == "single":
+        return [(None, np.arange(len(traj)))], None
+    if diag is None or np.all(diag.map_id < 0):
+        return ([(None, np.arange(len(traj)))],
+                "map ids unavailable: poses assumed to share one coordinate frame")
+    map_by_ts = dict(zip(diag.timestamps_ns.tolist(), diag.map_id.tolist()))
+    ids = np.array([map_by_ts.get(int(t), -1) for t in traj.timestamps_ns.tolist()])
+    out = []
+    for m in dict.fromkeys(ids.tolist()):
+        out.append((int(m), np.nonzero(ids == m)[0]))
+    note = None
+    if any(m == -1 for m, _ in out):
+        note = "some poses have no map id in the frame diagnostics; they form session -1"
+    return out, note
+
+
+def _concat(parts, key):
+    arrs = [p[key] for p in parts if p.get(key) is not None]
+    return np.concatenate(arrs) if arrs else None
+
+
+def evaluate_sessions(traj: Trajectory, gt: Trajectory, cfg: Dict[str, Any], coordinate_sessions: str,
+                      diag: Optional[FrameDiagnostics] = None, input_ts: Optional[np.ndarray] = None,
+                      scale_ambiguous: bool = False) -> Dict[str, Any]:
+    """evaluate_trajectory() per coordinate session, plus pooled statistics over eligible sessions.
+
+    Pooled ATE/RPE combine the per-sample/per-pair errors of sessions that were each aligned on
+    their own; nothing is ever aligned across sessions. Sessions with fewer than
+    session_min_matched matched samples are reported but not pooled (alignment would overfit).
+    """
+    c = dict(DEFAULT_EVAL)
+    c.update(cfg or {})
+    traj = traj.sorted_unique()
+    split, note = split_sessions(traj, coordinate_sessions, diag)
+    in_ts = np.asarray(input_ts) if input_ts is not None else None
+    in_dur = float((in_ts[-1] - in_ts[0]) * 1e-9) if in_ts is not None and len(in_ts) > 1 else None
+    sessions, pooled_parts = [], []
+    for map_id, idx in split:
+        sub = traj.subset(idx)
+        r = evaluate_trajectory(sub, gt, c, diag, input_ts, scale_ambiguous)
+        span = float((sub.timestamps_ns[-1] - sub.timestamps_ns[0]) * 1e-9) if len(sub) else 0.0
+        info = {"map_id": map_id, "n_poses": int(len(sub)),
+                "first_rel_s": float((sub.timestamps_ns[0] - in_ts[0]) * 1e-9) if in_ts is not None else None,
+                "span_s": span, "span_fraction_of_input": span / in_dur if in_dur else None}
+        n_m = r["association"]["n_matched"]
+        ok = isinstance(r.get("ate"), dict) and r["ate"].get("available", True) and n_m >= c["session_min_matched"]
+        r["session"] = info
+        r["included_in_pooled"] = bool(ok)
+        if not ok:
+            r["excluded_reason"] = (f"{n_m} matched samples < session_min_matched "
+                                    f"({c['session_min_matched']})")
+        else:
+            pooled_parts.append(r)
+        sessions.append(r)
+
+    res: Dict[str, Any] = {
+        "label": ACCURACY_LABEL, "coordinate_sessions": coordinate_sessions,
+        "settings": {k: c[k] for k in ("alignment", "association_max_dt_s", "segment_max_gap_s", "rpe",
+                                       "valid_states", "session_min_matched")},
+        "n_sessions": len(sessions), "n_sessions_pooled": len(pooled_parts),
+        "n_poses_in_unpooled_sessions": int(sum(r["session"]["n_poses"] for r in sessions
+                                                if not r["included_in_pooled"])),
+        "sessions": sessions}
+    if note:
+        res["session_note"] = note
+    res["association"] = {
+        "method": "nearest_neighbour_no_interpolation", "max_dt_s": c["association_max_dt_s"],
+        "n_valid_estimates": int(sum(r["association"]["n_valid_estimates"] for r in sessions)),
+        "n_matched": int(sum(r["association"]["n_matched"] for r in pooled_parts))}
+    if not pooled_parts:
+        res["ate"] = unavailable("no coordinate session with enough matched samples")
+        res["rpe"] = [unavailable("no coordinate session with enough matched samples")]
+        return res
+
+    series = [r["_series"] for r in pooled_parts]
+    seg_off, segs = 0, []
+    for sv in series:
+        segs.append(sv["segment"] + seg_off)
+        seg_off += int(sv["segment"].max()) + 1
+    sess_idx = np.concatenate([np.full(len(sv["t_ns"]), k) for k, sv in enumerate(series)])
+    res["_series"] = {"t_ns": _concat(series, "t_ns"), "est_pos": _concat(series, "est_pos"),
+                      "gt_pos": _concat(series, "gt_pos"), "trans_err": _concat(series, "trans_err"),
+                      "rot_err": _concat(series, "rot_err"), "segment": np.concatenate(segs),
+                      "session": sess_idx}
+    res["alignment"] = {"type": c["alignment"], "label": pooled_parts[0]["alignment"]["label"]
+                        + (" (fitted independently per map session)" if len(split) > 1 else ""),
+                        "per_session": [{"map_id": r["session"]["map_id"], "scale": r["alignment"]["scale"]}
+                                        for r in pooled_parts]}
+    if len(pooled_parts) == 1:
+        res["alignment"]["scale"] = pooled_parts[0]["alignment"]["scale"]
+    rot = res["_series"]["rot_err"]
+    res["ate"] = {"translation_m": _stats(res["_series"]["trans_err"]), "unit": "m",
+                  "rotation_deg": _stats(rot) if rot is not None and len(rot) == len(res["_series"]["t_ns"])
+                  else unavailable("ground truth or estimate has no orientation")}
+    largest = max(pooled_parts, key=lambda r: r["association"]["n_matched"])
+    if "diagnostics" in largest:
+        res["diagnostics"] = dict(largest["diagnostics"])
+        res["diagnostics"]["from_session_map_id"] = largest["session"]["map_id"]
+    ev = [r["evaluated_coverage"] for r in pooled_parts]
+    evc = {"n_matched_samples": int(sum(e["n_matched_samples"] for e in ev)),
+           "n_segments": int(sum(e["n_segments"] for e in ev)),
+           "evaluated_duration_s": float(sum(e["evaluated_duration_s"] for e in ev))}
+    if in_ts is not None and len(in_ts) > 1:
+        evc["matched_frame_fraction"] = evc["n_matched_samples"] / len(in_ts)
+        evc["evaluated_duration_fraction"] = evc["evaluated_duration_s"] / in_dur if in_dur else None
+        evc["input_frames_with_gt_fraction"] = ev[0].get("input_frames_with_gt_fraction")
+    res["evaluated_coverage"] = evc
+    rpes = []
+    for k, spec in enumerate(c["rpe"]):
+        parts = [r["rpe"][k] for r in pooled_parts if k < len(r["rpe"])]
+        out = {"delta": float(spec["delta"]), "delta_unit": spec["unit"],
+               "n_pairs": int(sum(p.get("n_pairs", 0) for p in parts)),
+               "pairs_within_valid_segments_only": True, "pairs_within_one_map_session_only": True}
+        te = _concat(parts, "_trans_err")
+        re = _concat(parts, "_rot_err")
+        out["translation_m"] = _stats(te) if te is not None and len(te) else unavailable(
+            "no sample pairs separated by delta inside a valid segment")
+        out["rotation_deg"] = (_stats(re) if re is not None and len(re)
+                               else unavailable("no rotation errors (no pairs or no orientation)"))
+        rpes.append(out)
+    res["rpe"] = rpes
     return res
 
 

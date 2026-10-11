@@ -24,15 +24,19 @@ Constructor: `(root: Path, sequence: str, options: dict)`; `options` comes from 
 |---|---|
 | `sequence_info() -> SequenceInfo` | streams actually present (logical name → `StreamInfo`), duration, GT availability. |
 | `stereo_calibration() -> StereoCalibration \| None` | calibration that matches the images handed to the estimator (`rectified` flag, model, `T_left_right`, baseline, provenance string). Single-camera datasets set `right=None` (mono modes only). |
-| `imu_calibration() -> ImuCalibration \| None` | `T_cam0_imu`, rate, `ImuNoise` (with `source` and `verified`), time offset (`None` = unknown). |
+| `imu_calibration() -> ImuCalibration \| None` | `T_cam0_imu`, rate, `ImuNoise` (with `source` and `verified`), time offset (`None` = unknown). A non-zero offset is rejected by `validate()` because slambench does not apply offsets to inputs yet. |
 | `ground_truth() -> GroundTruth \| None` | poses of `body_frame` in `reference_frame`, integer-ns stamps, `quaternions_xyzw=None` for position-only GT. Never written into estimator inputs. |
 | `T_gt_body_sensor(frame) -> 4x4 \| None` | pose of logical sensor frame (`cam0`, `imu`) in the GT body frame; `None` if unknown (accuracy is then reported as unavailable). |
 | `validate(mode) -> [str]` | human-readable reasons the mode cannot run (missing streams, calibration, unverified IMU noise). Base class implements the generic checks. |
 | `prepare_offline(mode, out_dir) -> PreparedInput` | write the offline format (below) with original timestamps; record every conversion in the manifest; `preprocessing: []` unless explicitly enabled. |
 | `provenance() -> dict` | paths, sizes, checksums… stored in `dataset_info.json`. |
+| `source_files() -> [Path]` | raw data and calibration files/directories that determine `prepare_offline()` output; fingerprinted into the cache key. |
 
-`prepare_cached()` wraps `prepare_offline()` with a cache keyed by
-`preparation_key()` (adapter name/version, sequence, mode and `input_affecting_options`).
+`prepare_cached()` wraps `prepare_offline()` with a cache keyed by `preparation_key()`: adapter
+name/version, the resolved dataset root, sequence, mode, `input_affecting_options` and a fingerprint
+of every `source_files()` entry (content hash for files ≤ 4 MB, size + mtime for larger files and
+for every file inside a directory). The inputs are recorded in `manifest.json →
+preparation_inputs`, so a different or updated copy of a sequence never reuses stale inputs.
 
 ### slambench offline format
 ```
@@ -57,7 +61,7 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
 | `version_info() -> dict` | pinned commit, image digest, library versions; raise if the installed version differs from the pin. |
 | `prepare(ctx)` | write native config into `ctx.algo_dir` from dataset calibration + settings. |
 | `command(ctx) -> [str]` | exact argv (saved to `command.txt`). |
-| `collect(ctx, returncode, timed_out) -> AlgorithmOutput` | classify outcome (`success`, `init_failure`, `crash`, `timeout`, `missing_output`), write the normalized trajectory and diagnostics. |
+| `collect(ctx, returncode, timed_out) -> AlgorithmOutput` | classify outcome (`success`, `init_failure`, `crash`, `timeout`, `missing_output`), write the normalized trajectories and diagnostics. Should not raise on partial outputs (e.g. after a crash); an exception is recorded as `collect_failed`. |
 
 ### Normalized outputs
 * `trajectory.tum` (+ `trajectory.json` sidecar): TUM format, `timestamp tx ty tz qx qy qz qw`,
@@ -67,8 +71,12 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   in_final_trajectory`. Empty fields mean *unavailable*, never zero. If an estimator exposes no
   tracking state, do not write the file: the evaluator then reports an explicitly labelled
   output-availability **proxy** instead of coverage.
-* `AlgorithmOutput.diagnostics_available` states which diagnostics exist;
-  `keyframe_only=True` marks keyframe-only trajectories.
+* `AlgorithmOutput.trajectories`: one `TrajectoryOutput` per normalized trajectory with `kind`
+  (`online` = pose emitted right after each frame; `final` = exported after shutdown), `path`,
+  `frame` (logical sensor frame; online and final may differ), `coordinate_sessions` (`single`, or
+  `map_id` when each pose is in the frame of the map active at that time) and `keyframe_only`.
+  The legacy `trajectory`/`estimate_frame` fields are read as the final trajectory.
+* `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory
 `<output_root>/<name>/<YYYYmmdd-HHMMSS>_<id>/`
@@ -80,14 +88,32 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
 | `dataset_info.json` | streams, calibration used, provenance, calibration cross-checks |
 | `prepared_input.json` | prepared directory + manifest |
 | `command.txt`, `stdout.log`, `stderr.log` | exact command and logs |
-| `status.json` | status, message, return code, timeout flag, wall time, peak RSS, CPU time, `eval_status` |
+| `status.json` | written at creation (`status: running`) and updated per `stage`; final status, message, `estimator_outcome`, return code, timeout flag, wall time, peak RSS (or `peak_rss_unavailable_reason`), CPU time, `eval_status`, `error` |
+| `error.json` | for harness-side failures: stage, exception type, message, traceback |
 | `algorithm/` | native config and raw estimator outputs |
-| `algorithm_output.json`, `trajectory.tum`, `frame_diagnostics.csv` | normalized outputs |
+| `algorithm_output.json`, `trajectory.tum` (final), `trajectory_online.tum`, `frame_diagnostics.csv` | normalized outputs |
 | `eval/metrics.json`, `eval/*.png` | metrics and plots |
 | `summary.csv` | one-row summary (also produced for batches) |
 
+## Run status and stages
+Stages (`status.json → stage`): `resolve`, `environment`, `validate`, `dataset_info`,
+`prepare_input`, `algorithm_prepare`, `execute`, `collect`, `evaluate`, `done`.
+
+| status | meaning |
+|---|---|
+| `success`, `init_failure`, `crash`, `timeout`, `missing_output` | estimator outcome, classified by the algorithm adapter |
+| `config_rejected` | invalid config, failed version check, or incompatible dataset/mode/calibration |
+| `prepare_failed` | input conversion or native configuration failed |
+| `collect_failed` | the estimator finished (see `estimator_outcome`) but slambench could not parse its outputs |
+| `harness_error` | unexpected slambench failure (e.g. estimator executable missing) |
+
+An estimator segfault is `crash`; a Python error while parsing its output is `collect_failed`.
+Memory monitoring is best effort and never changes the outcome. A run killed from outside keeps
+`status: running` with the last stage. Batches run every experiment and write one summary row each.
+
 ## Adding a dataset or an algorithm
-* Dataset: subclass `DatasetAdapter`, implement the methods above, register it, add a config.
+* Dataset: subclass `DatasetAdapter`, implement the methods above (including `source_files()`),
+  register it, add a config.
   Run `slambench inspect <config>` to see streams, calibration and per-mode compatibility.
 * Algorithm: subclass `AlgorithmAdapter`, pin the estimator (container/commit), emit the
   normalized outputs, register it. The runner and evaluator need no changes.

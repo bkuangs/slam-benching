@@ -43,7 +43,7 @@ def test_successful_run_records_metadata_and_metrics(tmp_path):
               "eval/metrics.json", "eval/trajectory.png", "eval/error_and_tracking.png"):
         assert (d / f).exists(), f
     m = json.loads((d / "eval" / "metrics.json").read_text())
-    assert m["accuracy"]["ate"]["translation_m"]["rmse"] == pytest.approx(0.05, abs=2e-3)
+    assert m["accuracy"]["final"]["ate"]["translation_m"]["rmse"] == pytest.approx(0.05, abs=2e-3)
     assert m["coverage"]["source"] == "estimator_tracking_state"
     assert m["coverage"]["frame_coverage"] == 1.0
     env = json.loads((d / "environment.json").read_text())
@@ -98,8 +98,8 @@ def test_crash_is_reported_and_batch_summary_lists_failures(tmp_path):
     out = write_summary([ok, bad, rej], tmp_path / "summary.csv")
     rows = list(csv.DictReader(open(out)))
     assert [r["status"] for r in rows] == ["success", "crash", "config_rejected"]
-    assert float(rows[0]["ate_trans_rmse_m"]) == pytest.approx(0.05, abs=2e-3)
-    assert rows[1]["ate_trans_rmse_m"] == ""
+    assert float(rows[0]["final_ate_trans_rmse_m"]) == pytest.approx(0.05, abs=2e-3)
+    assert rows[1]["final_ate_trans_rmse_m"] == ""
 
 
 def test_timeout_is_reported(tmp_path, monkeypatch):

@@ -86,6 +86,8 @@ No noise densities or bias random walks are published. The dataset notes say an 
 calibration was done but give no values. Inertial modes are rejected until
 `dataset.options.imu_noise` is supplied with a source and `verified: true`. The sensors are
 hardware-synchronised (PPS and FPGA, ≤ 3 ms between sensors), so `time_offset_s` defaults to 0.
+A non-zero `time_offset_s` is rejected for inertial modes: slambench does not shift IMU timestamps
+yet, so recording an offset would misdescribe the inputs actually used.
 
 ## Configs
 * `configs/subtmrs_smokeroom_orbslam3_mono.yaml`: ORB-SLAM3 mono, Sim(3) alignment.

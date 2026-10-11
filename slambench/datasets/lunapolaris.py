@@ -128,6 +128,13 @@ class LunaPolarisAdapter(DatasetAdapter):
             return m
         raise ValueError(f"topic {topic} has no messages")
 
+    def source_files(self):
+        md = self.bag_dir / "metadata.yaml"
+        files = [md]
+        if md.exists():
+            files += [self.bag_dir / f["path"] for f in self._metadata()["files"]]
+        return files
+
     # ---- metadata --------------------------------------------------------
     def provenance(self) -> Dict[str, Any]:
         md = self._metadata()

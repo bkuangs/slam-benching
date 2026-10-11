@@ -23,3 +23,6 @@ target_link_libraries(orbslam3_driver
     ${ORBSLAM3_ROOT}/Thirdparty/DBoW2/lib/libDBoW2.so
     ${ORBSLAM3_ROOT}/Thirdparty/g2o/lib/libg2o.so
     ${OpenCV_LIBS} ${Pangolin_LIBRARIES} -lboost_serialization -lcrypto pthread)
+
+add_executable(slambench_preprocess_check slambench_preprocess_check.cc)
+target_link_libraries(slambench_preprocess_check ${OpenCV_LIBS})

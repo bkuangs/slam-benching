@@ -14,7 +14,7 @@ def _cmd_run(args) -> int:
     from .config import load_config, parse_overrides
     from .evaluation.summary import write_summary
     from .runner import run_experiment
-    cfg = load_config(Path(args.config), parse_overrides(args.set))
+    cfg = load_config(Path(args.config), parse_overrides(args.set), validate=False)
     run_dir = run_experiment(cfg, evaluate=not args.no_eval)
     st = json.loads((run_dir / "status.json").read_text())
     write_summary([run_dir], run_dir / "summary.csv")
@@ -31,25 +31,34 @@ def _cmd_batch(args) -> int:
     cfgs = []
     for p in args.configs:
         raw = yaml.safe_load(Path(p).read_text()) or {}
-        cfgs += load_batch(Path(p), ov) if "experiments" in raw else [load_config(Path(p), ov)]
-    run_dirs, failed = [], 0
+        cfgs += load_batch(Path(p), ov) if "experiments" in raw else [load_config(Path(p), ov, validate=False)]
+    entries, failed = run_batch(cfgs, evaluate=not args.no_eval)
+    out = Path(args.summary) if args.summary else (
+        expand(cfgs[0].get("output_root") or "~/scratch/slam-bench-work/runs")
+        / f"batch_{dt.datetime.now():%Y%m%d-%H%M%S}.csv")
+    write_summary(entries, out)
+    print(f"[slambench] {len(entries)} experiments, {failed} not successful; summary: {out}")
+    return 0 if failed == 0 else 1
+
+
+def run_batch(cfgs, evaluate: bool = True, log=print):
+    """Run every config; one summary entry per config, even if a run could not be created."""
+    from .runner import _safe_name, run_experiment
+    entries, failed = [], 0
     for i, cfg in enumerate(cfgs):
-        print(f"[slambench] batch {i + 1}/{len(cfgs)}: {cfg.get('name') or cfg['_source']}")
+        log(f"[slambench] batch {i + 1}/{len(cfgs)}: {_safe_name(cfg)}")
         try:
-            from .config import validate_config
-            cfg = validate_config(cfg)
-            d = run_experiment(cfg, evaluate=not args.no_eval)
-        except Exception as exc:  # noqa: BLE001 - keep going, record failure
-            print(f"[slambench] experiment could not start: {exc}")
+            d = run_experiment(cfg, evaluate=evaluate, log=log)
+        except Exception as exc:  # noqa: BLE001 - e.g. run directory cannot be created
+            log(f"[slambench] experiment could not start: {exc}")
+            entries.append({"run_id": "", "status": "harness_error", "stage": "create_run_dir",
+                            "message": f"run directory could not be created: {type(exc).__name__}: {exc}",
+                            "config_source": cfg.get("_source", "")})
             failed += 1
             continue
-        run_dirs.append(d)
-        failed += json.loads((d / "status.json").read_text())["status"] != "success"
-    out = Path(args.summary) if args.summary else (
-        expand(cfgs[0]["output_root"]) / f"batch_{dt.datetime.now():%Y%m%d-%H%M%S}.csv")
-    write_summary(run_dirs, out)
-    print(f"[slambench] {len(run_dirs)} runs, {failed} not successful; summary: {out}")
-    return 0 if failed == 0 else 1
+        entries.append(d)
+        failed += json.loads((d / "status.json").read_text()).get("status") != "success"
+    return entries, failed
 
 
 def _cmd_evaluate(args) -> int:
@@ -57,8 +66,9 @@ def _cmd_evaluate(args) -> int:
     from .config import parse_overrides
     m = evaluate_run(Path(args.run_dir), eval_cfg=parse_overrides(args.set).get("evaluation"))
     acc = m.get("accuracy", {})
-    print(json.dumps({"ate": acc.get("ate"), "coverage_source": m.get("coverage", {}).get("source")},
-                     indent=2, default=str))
+    print(json.dumps({**{f"{k}_ate": (a.get("ate") if isinstance(a, dict) and "ate" in a else a)
+                         for k, a in acc.items()},
+                      "coverage_source": m.get("coverage", {}).get("source")}, indent=2, default=str))
     return 0
 
 

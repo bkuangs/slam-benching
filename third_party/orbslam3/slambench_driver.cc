@@ -12,7 +12,9 @@
 //   mode: stereo | stereo_inertial | mono | mono_inertial
 //   --playback-rate R : R > 0 throttles input to R x the recorded frame rate
 //                       (1.0 = real time); R = 0 feeds frames as fast as possible.
-//   --clahe           : apply CLAHE(3.0, 8x8) to grayscale input (disabled by default).
+//   --clahe           : apply CLAHE(3.0, 8x8) (disabled by default). Colour input (BGR/BGRA as
+//                       loaded by cv::imread) is converted to grayscale first; other formats
+//                       are rejected (see slambench_preprocess.h).
 //
 // Input (input_dir):
 //   frames.csv : timestamp_ns,left_path,right_path   (right_path empty for mono)
@@ -25,6 +27,8 @@
 //   driver_status.json    exit status written by the driver itself
 
 #include <System.h>
+
+#include "slambench_preprocess.h"
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -90,12 +94,16 @@ bool LoadImu(const string &path, vector<long long> &t_ns, vector<ORB_SLAM3::IMU:
     return true;
 }
 
+slambench::PreprocessStats g_pre;
+
 void WriteStatus(const string &path, const string &status, const string &message,
                  size_t n_frames_total, size_t n_frames_fed) {
     ofstream f(path);
     f << "{\n  \"status\": \"" << status << "\",\n  \"message\": \"" << message
       << "\",\n  \"n_frames_total\": " << n_frames_total
-      << ",\n  \"n_frames_fed\": " << n_frames_fed << "\n}\n";
+      << ",\n  \"n_frames_fed\": " << n_frames_fed
+      << ",\n  \"n_images_color_to_gray\": " << g_pre.n_color_to_gray
+      << ",\n  \"n_images_clahe\": " << g_pre.n_clahe << "\n}\n";
 }
 
 }  // namespace
@@ -143,7 +151,7 @@ int main(int argc, char **argv) {
     }
 
     ORB_SLAM3::System SLAM(vocab, settings, sensor, false);
-    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+    cv::Ptr<cv::CLAHE> clahe = slambench::MakeClahe();
 
     ofstream log(output_dir + "/frame_log.csv");
     log << "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,"
@@ -171,18 +179,17 @@ int main(int argc, char **argv) {
             SLAM.Shutdown();
             return 3;
         }
-        if (im_l.depth() != CV_8U || (stereo && im_r.depth() != CV_8U)) {
-            // ORB extraction requires 8-bit input; refuse instead of silently finding no features.
-            cerr << "Frame " << i << " is not 8-bit (depth " << im_l.depth() << ")" << endl;
+        // ORB extraction requires 8-bit 1/3/4-channel input; refuse anything else explicitly
+        // instead of silently finding no features or skipping preprocessing.
+        string err = slambench::PreprocessForOrb(im_l, use_clahe, clahe, g_pre);
+        if (err.empty() && stereo) err = slambench::PreprocessForOrb(im_r, use_clahe, clahe, g_pre);
+        if (!err.empty()) {
+            cerr << "Frame " << i << ": " << err << endl;
             log.flush();
-            WriteStatus(status_path, "input_error", "input images must be 8-bit; convert in the dataset adapter",
+            WriteStatus(status_path, "input_error", "frame " + to_string(i) + ": " + err,
                         frames.size(), fed);
             SLAM.Shutdown();
             return 3;
-        }
-        if (use_clahe) {
-            if (im_l.channels() == 1) clahe->apply(im_l, im_l);
-            if (stereo && im_r.channels() == 1) clahe->apply(im_r, im_r);
         }
 
         vector<ORB_SLAM3::IMU::Point> imu_batch;

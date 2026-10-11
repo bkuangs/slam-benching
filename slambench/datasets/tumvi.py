@@ -72,6 +72,9 @@ class TumViAdapter(DatasetAdapter):
         t = np.array([int(r[0]) for r in _read_csv_rows(self.mav0 / "imu0" / "data.csv")], dtype=np.int64)
         return t, rows[:, 1:4], rows[:, 4:7]
 
+    def source_files(self):
+        return [self.mav0 / "cam0", self.mav0 / "cam1", self.mav0 / "imu0" / "data.csv"]
+
     def sequence_info(self) -> SequenceInfo:
         if not self.mav0.exists():
             raise FileNotFoundError(f"{self.mav0} not found")

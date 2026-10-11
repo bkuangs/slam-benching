@@ -47,14 +47,17 @@ def parse_overrides(items: Optional[List[str]]) -> Dict[str, Any]:
     return out
 
 
-def load_config(path: Path, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def load_config(path: Path, overrides: Optional[Dict[str, Any]] = None,
+                validate: bool = True) -> Dict[str, Any]:
+    """Load one experiment. With validate=False, missing keys are left for run_experiment() to
+    report as a config_rejected run (so the failure still produces a run directory)."""
     raw = yaml.safe_load(Path(path).read_text()) or {}
     if "experiments" in raw:
         raise ValueError(f"{path} is a batch file; use `slambench batch`")
     cfg = deep_merge(DEFAULTS, raw)
     cfg = deep_merge(cfg, overrides or {})
     cfg["_source"] = str(Path(path).resolve())
-    return validate_config(cfg)
+    return validate_config(cfg) if validate else cfg
 
 
 def load_batch(path: Path, overrides: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:

@@ -49,6 +49,9 @@ class RunStatus(str, Enum):
     TIMEOUT = "timeout"
     MISSING_OUTPUT = "missing_output"
     EVAL_FAILED = "eval_failed"
+    # Harness-side failures (the estimator itself is not to blame):
+    COLLECT_FAILED = "collect_failed"   # estimator finished, but its outputs could not be parsed
+    HARNESS_ERROR = "harness_error"     # unexpected error in slambench (environment, execution, ...)
 
 
 @dataclass

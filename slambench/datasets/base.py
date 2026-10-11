@@ -58,6 +58,18 @@ class DatasetAdapter(ABC):
         as the estimate. Returns None if the relation is unknown.
         """
 
+    def source_files(self) -> List[Path]:
+        """Files and directories whose content determines prepare_offline() output.
+
+        They are fingerprinted into the prepared-input cache key, so an updated or different copy
+        of a sequence never reuses stale inputs. Adapters should list raw data and any calibration
+        the conversion depends on.
+        """
+        return []
+
+    def source_fingerprint(self) -> Dict[str, Any]:
+        return {str(p): fingerprint_path(Path(p)) for p in self.source_files()}
+
     def provenance(self) -> Dict[str, Any]:
         """Dataset-specific provenance to store in run metadata (paths, sizes, checksums...)."""
         return {"root": str(self.root), "sequence": self.sequence}
@@ -86,7 +98,12 @@ class DatasetAdapter(ABC):
             imu = self.imu_calibration()
             if imu is None:
                 problems.append("no camera-IMU calibration available")
-            elif imu.noise is None:
+                return problems
+            if imu.time_offset_s not in (None, 0, 0.0):
+                problems.append(f"camera-IMU time offset {imu.time_offset_s} s is configured but slambench does "
+                                "not apply time offsets to estimator inputs yet; only 0 (or unknown) is "
+                                "accepted so recorded calibration never differs from what was used")
+            if imu.noise is None:
                 problems.append("IMU noise parameters (noise densities and random walks) are not "
                                 "available for this dataset; supply verified values via "
                                 "dataset.options.imu_noise with a source")
@@ -104,17 +121,23 @@ class DatasetAdapter(ABC):
         must record every conversion in the manifest.
         """
 
-    def preparation_key(self, mode: SensorMode) -> str:
+    def preparation_inputs(self, mode: SensorMode) -> Dict[str, Any]:
+        """Everything that influences prepare_offline() output; hashed into the cache key."""
+        return {"adapter": self.name, "adapter_version": getattr(self, "adapter_version", "1"),
+                "dataset_root": str(self.root.resolve()), "sequence": self.sequence, "mode": mode.value,
+                "options": {k: v for k, v in sorted(self.options.items())
+                            if k in getattr(self, "input_affecting_options", ())},
+                "source_fingerprint": self.source_fingerprint()}
+
+    def preparation_key(self, mode: SensorMode, inputs: Optional[Dict[str, Any]] = None) -> str:
         """Stable key of everything that influences prepare_offline() output (for caching)."""
-        payload = {"adapter": self.name, "adapter_version": getattr(self, "adapter_version", "1"),
-                   "sequence": self.sequence, "mode": mode.value,
-                   "options": {k: v for k, v in sorted(self.options.items())
-                               if k in getattr(self, "input_affecting_options", ())}}
+        payload = inputs if inputs is not None else self.preparation_inputs(mode)
         return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def prepare_cached(self, mode: SensorMode, cache_root: Path) -> PreparedInput:
         """prepare_offline() with a cache keyed by preparation_key()."""
-        key = self.preparation_key(mode)
+        inputs = self.preparation_inputs(mode)
+        key = self.preparation_key(mode, inputs)
         out = Path(cache_root) / self.name / self.sequence / f"{mode.value}_{key}"
         manifest_path = out / "manifest.json"
         if manifest_path.exists():
@@ -127,13 +150,38 @@ class DatasetAdapter(ABC):
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True)
         prepared = self.prepare_offline(mode, tmp)
-        prepared.manifest.update({"complete": True, "preparation_key": key})
+        prepared.manifest.update({"complete": True, "preparation_key": key, "preparation_inputs": inputs})
         (tmp / "manifest.json").write_text(json.dumps(prepared.manifest, indent=2, default=str))
         if out.exists():
             import shutil
             shutil.rmtree(out)
         tmp.rename(out)
         return PreparedInput(out, mode, prepared.n_frames, prepared.n_imu, prepared.manifest)
+
+
+#: Files up to this size are fingerprinted by content; larger ones by size + mtime.
+FINGERPRINT_HASH_MAX_BYTES = 4 * 2 ** 20
+
+
+def fingerprint_path(p: Path) -> Dict[str, Any]:
+    """Cheap, change-sensitive fingerprint of a file or directory (recursive)."""
+    p = Path(p)
+    if not p.exists():
+        return {"missing": True}
+    if p.is_file():
+        st = p.stat()
+        if st.st_size <= FINGERPRINT_HASH_MAX_BYTES:
+            return {"size": st.st_size, "sha1": hashlib.sha1(p.read_bytes()).hexdigest()}
+        return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    h = hashlib.sha1()
+    n = total = 0
+    for f in sorted(q for q in p.rglob("*") if q.is_file()):
+        st = f.stat()
+        h.update(f"{f.relative_to(p)}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+        n += 1
+        total += st.st_size
+    return {"n_files": n, "total_size": total, "listing_sha1": h.hexdigest(),
+            "method": "relative path, size and mtime of every file"}
 
 
 def write_frames_csv(path: Path, rows) -> int:

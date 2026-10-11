@@ -34,7 +34,8 @@ import numpy as np
 
 from ..trajectory import Trajectory, invert_T, write_tum
 from ..types import RunStatus, SensorMode
-from .base import (FRAME_DIAGNOSTICS_COLUMNS, AlgorithmAdapter, AlgorithmOutput, RunContext)
+from .base import (FRAME_DIAGNOSTICS_COLUMNS, AlgorithmAdapter, AlgorithmOutput, RunContext,
+                   TrajectoryOutput)
 
 ORBSLAM3_COMMIT = "4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4"
 DEFAULT_CONTAINER = "~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif"
@@ -42,6 +43,20 @@ DEFAULT_CONTAINER = "~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif"
 TRACKING_STATES = {-1: "system_not_ready", 0: "no_images_yet", 1: "not_initialized", 2: "ok",
                    3: "recently_lost", 4: "lost", 5: "ok_klt"}
 OK_STATES = {2, 5}
+POSE_COLUMNS = ("tx", "ty", "tz", "qx", "qy", "qz", "qw")
+DRIVER_SOURCES = ("slambench_driver.cc", "slambench_preprocess.h")
+DRIVER_SOURCE_DIR = Path(__file__).resolve().parents[2] / "third_party" / "orbslam3"
+
+
+def driver_source_sha1() -> Optional[str]:
+    """sha1 of the driver sources in this repository (same as the image's driver_source_sha1)."""
+    h = hashlib.sha1()
+    try:
+        for name in DRIVER_SOURCES:
+            h.update((DRIVER_SOURCE_DIR / name).read_bytes())
+    except OSError:
+        return None
+    return h.hexdigest()
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "orb_n_features": 1200,
@@ -154,6 +169,13 @@ class OrbSlam3Adapter(AlgorithmAdapter):
         commit = info.get("container_versions", {}).get("orbslam3_commit")
         if commit and commit != ORBSLAM3_COMMIT:
             raise RuntimeError(f"container ORB-SLAM3 commit {commit} != pinned {ORBSLAM3_COMMIT}")
+        info["expected_driver_source_sha1"] = expected = driver_source_sha1()
+        found = info.get("container_versions", {}).get("driver_source_sha1")
+        # Only judge a readable image (a missing image is reported by validate()).
+        if commit and expected and found != expected:
+            raise RuntimeError(f"container driver source {found or '(not recorded)'} differs from this "
+                               f"repository's driver {expected}; rebuild the image with "
+                               "third_party/orbslam3/build_container.sh")
         return info
 
     # ---- settings file -----------------------------------------------------
@@ -253,14 +275,54 @@ class OrbSlam3Adapter(AlgorithmAdapter):
         return cmd
 
     # ---- outputs -----------------------------------------------------------
+    @staticmethod
+    def read_frame_log(path: Path):
+        """Parse the driver's frame_log.csv. Returns (rows, n_malformed).
+
+        Rows whose index/timestamp/state cannot be parsed (e.g. a line truncated by a crash) are
+        counted and skipped. A row keeps ``pose=None`` unless all seven pose fields are finite and
+        the quaternion is unit length.
+        """
+        rows: List[Dict[str, Any]] = []
+        malformed = 0
+        if not path.exists():
+            return rows, malformed
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    row = {"frame_idx": int(r["frame_idx"]), "timestamp_ns": int(r["timestamp_ns"]),
+                           "state": int(r["state"]),
+                           "map_id": int(r["map_id"]) if r.get("map_id") not in (None, "") else -1,
+                           "track_time_s": (float(r["track_time_s"]) if r.get("track_time_s") not in (None, "")
+                                            else float("nan"))}
+                except (TypeError, ValueError, KeyError):
+                    malformed += 1
+                    continue
+                pose = None
+                vals = [r.get(k) for k in POSE_COLUMNS]
+                if all(v not in (None, "") for v in vals):
+                    try:
+                        v = np.array([float(x) for x in vals])
+                        if np.all(np.isfinite(v)) and abs(np.linalg.norm(v[3:]) - 1.0) < 1e-3:
+                            pose = v
+                    except ValueError:
+                        pass
+                row["pose"] = pose
+                rows.append(row)
+        return rows, malformed
+
     def collect(self, ctx: RunContext, returncode: Optional[int], timed_out: bool) -> AlgorithmOutput:
         d = ctx.algo_dir
         frames_ts = np.loadtxt(ctx.prepared.frames_csv, delimiter=",", skiprows=1, usecols=0,
                                dtype=np.int64, ndmin=1)
-        driver_status = {}
+        extra: Dict[str, Any] = {}
+        driver_status: Dict[str, Any] = {}
         if (d / "driver_status.json").exists():
-            driver_status = json.loads((d / "driver_status.json").read_text())
-        extra: Dict[str, Any] = {"driver_status": driver_status}
+            try:
+                driver_status = json.loads((d / "driver_status.json").read_text())
+            except json.JSONDecodeError as exc:
+                extra["driver_status_unreadable"] = str(exc)
+        extra["driver_status"] = driver_status
         stdout = (ctx.run_dir / "stdout.log")
         if stdout.exists():
             text = stdout.read_text(errors="replace")
@@ -269,16 +331,33 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 extra["n_maps_in_atlas"] = int(m[-1])
             extra["map_kf_counts"] = {int(a): int(b) for a, b in re.findall(r"Map (\d+) has (\d+) KFs", text)}
 
-        # Per-frame diagnostics from the driver log.
-        log_rows = []
-        if (d / "frame_log.csv").exists():
-            with open(d / "frame_log.csv") as f:
-                log_rows = list(csv.DictReader(f))
-        states = np.array([int(r["state"]) for r in log_rows], dtype=int)
+        # Per-frame diagnostics and online poses from the driver log.
+        log_rows, n_malformed = self.read_frame_log(d / "frame_log.csv")
+        states = np.array([r["state"] for r in log_rows], dtype=int)
         n_ok = int(np.isin(states, list(OK_STATES)).sum()) if len(states) else 0
+        trajectories: List[TrajectoryOutput] = []
+
+        online = [r for r in log_rows if r["state"] in OK_STATES and r["pose"] is not None]
+        extra["n_frame_log_rows_malformed"] = n_malformed
+        extra["n_online_poses"] = len(online)
+        extra["n_ok_frames_without_valid_online_pose"] = n_ok - len(online)
+        if online:
+            P = np.array([r["pose"] for r in online])
+            otraj = Trajectory(np.array([r["timestamp_ns"] for r in online], dtype=np.int64), P[:, :3], P[:, 3:],
+                               frame="cam0",
+                               meta={"source": str(d / "frame_log.csv"), "estimator": "ORB-SLAM3",
+                                     "content": "online pose returned by Track*() immediately after each "
+                                                "frame, tracking-OK frames only; camera frame; expressed "
+                                                "in the map active at that moment (see map_id)"})
+            online_path = ctx.run_dir / "trajectory_online.tum"
+            write_tum(otraj, online_path)
+            trajectories.append(TrajectoryOutput(
+                "online", online_path, "cam0",
+                "pose available right after each frame was tracked (may include loop closures that "
+                "had already happened, never later ones)", coordinate_sessions="map_id"))
 
         # Final trajectory -> normalized TUM, with timestamps snapped to the exact input stamps.
-        traj_path, final_ts = None, set()
+        traj_path, final_ts, final_problem = None, set(), None
         raw = d / "trajectory_euroc.txt"
         if raw.exists() and raw.stat().st_size > 0:
             data = np.loadtxt(raw, ndmin=2)
@@ -289,15 +368,18 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             err = np.abs(best - t_float_ns)
             extra["timestamp_snap_max_abs_ns"] = float(err.max())
             if err.max() > 1000:  # double-precision seconds round-trip is accurate to ~0.3 us
-                return AlgorithmOutput(RunStatus.MISSING_OUTPUT,
-                                       f"trajectory timestamps do not match input frames (max {err.max()} ns)",
-                                       extra=extra)
-            traj = Trajectory(best, data[:, 1:4], data[:, 4:8], frame=self.estimate_frame(ctx.mode),
-                              meta={"source": str(raw), "estimator": "ORB-SLAM3",
-                                    "content": "final optimized poses, largest map, non-LOST frames"})
-            traj_path = ctx.run_dir / "trajectory.tum"
-            write_tum(traj, traj_path)
-            final_ts = set(best.tolist())
+                final_problem = f"final trajectory timestamps do not match input frames (max {err.max()} ns)"
+            else:
+                traj = Trajectory(best, data[:, 1:4], data[:, 4:8], frame=self.estimate_frame(ctx.mode),
+                                  meta={"source": str(raw), "estimator": "ORB-SLAM3",
+                                        "content": "final optimized poses, largest map, non-LOST frames"})
+                traj_path = ctx.run_dir / "trajectory.tum"
+                write_tum(traj, traj_path)
+                final_ts = set(best.tolist())
+                trajectories.append(TrajectoryOutput(
+                    "final", traj_path, self.estimate_frame(ctx.mode),
+                    "System::SaveTrajectoryEuRoC after shutdown: all later optimization applied; "
+                    "largest map only", coordinate_sessions="single"))
 
         diag_path = None
         if log_rows:
@@ -306,17 +388,18 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 w = csv.writer(f)
                 w.writerow(FRAME_DIAGNOSTICS_COLUMNS)
                 for r in log_rows:
-                    st = int(r["state"])
-                    ts = int(r["timestamp_ns"])
-                    w.writerow([ts, TRACKING_STATES.get(st, str(st)), int(st in OK_STATES), r["map_id"],
-                                r["track_time_s"], int(ts in final_ts)])
+                    st = r["state"]
+                    tt = "" if np.isnan(r["track_time_s"]) else r["track_time_s"]
+                    w.writerow([r["timestamp_ns"], TRACKING_STATES.get(st, str(st)), int(st in OK_STATES),
+                                r["map_id"] if r["map_id"] >= 0 else "", tt, int(r["timestamp_ns"] in final_ts)])
         avail = {"tracking_state": bool(log_rows), "map_id": bool(log_rows),
-                 "per_frame_time": bool(log_rows)}
+                 "per_frame_time": bool(log_rows), "online_pose": bool(online)}
         extra.update({"n_frames_input": int(len(frames_ts)), "n_frames_logged": len(log_rows),
                       "n_frames_tracking_ok": n_ok, "n_final_poses": len(final_ts)})
 
         common = dict(trajectory=traj_path, estimate_frame=self.estimate_frame(ctx.mode),
-                      frame_diagnostics=diag_path, diagnostics_available=avail, extra=extra)
+                      frame_diagnostics=diag_path, diagnostics_available=avail, extra=extra,
+                      trajectories=trajectories)
         if timed_out:
             return AlgorithmOutput(RunStatus.TIMEOUT, "execution timed out", **common)
         if returncode is None or returncode != 0:
@@ -328,6 +411,8 @@ class OrbSlam3Adapter(AlgorithmAdapter):
         if log_rows and n_ok == 0:
             return AlgorithmOutput(RunStatus.INIT_FAILURE,
                                    f"tracking never reached OK in {len(log_rows)} frames", **common)
+        if final_problem:
+            return AlgorithmOutput(RunStatus.MISSING_OUTPUT, final_problem, **common)
         if traj_path is None:
             return AlgorithmOutput(RunStatus.MISSING_OUTPUT, "trajectory_euroc.txt missing or empty", **common)
         if not log_rows:
