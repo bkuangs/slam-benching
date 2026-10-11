@@ -96,6 +96,9 @@ class AlgorithmOutput:
     keyframe_only: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
     trajectories: List[TrajectoryOutput] = field(default_factory=list)
+    #: optional files in slambench formats (slambench/artifacts.py): "tracked_features",
+    #: "sparse_map_points", "sparse_map_keyframes"
+    artifacts: Dict[str, Path] = field(default_factory=dict)
 
     def all_trajectories(self) -> List[TrajectoryOutput]:
         """Declared trajectories; a legacy `trajectory` counts as the final trajectory."""
@@ -115,7 +118,8 @@ class AlgorithmOutput:
                 "estimate_frame": final.frame if final else self.estimate_frame,
                 "frame_diagnostics": str(self.frame_diagnostics) if self.frame_diagnostics else None,
                 "diagnostics_available": self.diagnostics_available,
-                "keyframe_only": self.keyframe_only, "extra": self.extra}
+                "keyframe_only": self.keyframe_only, "extra": self.extra,
+                "artifacts": {k: str(v) for k, v in self.artifacts.items()}}
 
 
 def trajectories_from_output_json(d: Dict[str, Any]) -> List[TrajectoryOutput]:

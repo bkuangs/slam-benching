@@ -78,18 +78,24 @@ slambench view <run_dir>                                          # replay file 
 `<run_dir>/replay.rrd` (SmokeRoom, stride 2: ~110 MB, ~1.5 min). Copy it to a machine with a display
 and open it with the **same** Rerun version: `pip install rerun-sdk==0.26.2 && rerun replay.rrd`.
 Play, pause and scrub on the `time` (seconds since the first frame) or `frame` timeline:
-* camera images (every `stride`-th frame, JPEG preview of the prepared estimator input);
-* 3D: ground truth (grey), final trajectory (red), one colour per online coordinate session, each
-  with a labelled start marker; paths break at tracking gaps and session boundaries, and moving
+* camera images (every `stride`-th frame, JPEG preview of the prepared estimator input) with the
+  features ORB-SLAM3 tracked: green = matched to a map point, orange = matched but rejected as
+  outlier, blue = no map point (ORB-SLAM3 setting `log_features`, on by default);
+* 3D: ground truth (grey), final trajectory (red) with its sparse map (orange points, dark-red
+  keyframes; the map ORB-SLAM3 exported at shutdown, placed with the final trajectory's alignment),
+  one colour per online coordinate session, each with a labelled start marker; paths break at tracking gaps and session boundaries, and moving
   markers show the current pose (cleared while there is none);
 * position error per online session and for the final trajectory, tracking OK / coordinate session /
-  map id, tracking time vs frame period, and a log of tracking-state and session changes;
+  map id, keypoints / inliers / outliers per frame, tracking time vs frame period, and a log of
+  tracking-state and session changes;
 * a run panel with status and per-session accuracy.
 
 Positions are aligned exactly as the evaluator scores them (each session on its own, using the whole
 session's ground truth): aligned benchmark accuracy, not what the vehicle knew at that instant. If
 ground truth or the dataset is unavailable, raw poses are drawn per session and labelled unaligned.
-Feature/match overlays and map points are not shown (the driver does not log them yet).
+Only the map exported at shutdown is shown (points of other, unmerged maps have no common frame and
+are counted, not drawn); map growth over time is not recorded. Monocular maps carry the same per-
+session scale estimate as the trajectory.
 Any config value can be overridden: `--set algorithm.settings.loop_closure=false`.
 
 ### Experiment config

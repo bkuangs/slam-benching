@@ -26,7 +26,7 @@ from slambench.evaluation.summary import write_summary
 from slambench.trajectory import Trajectory, invert_T
 from slambench.types import SensorMode
 
-from synthetic import FakeDataset, make_T, random_world, sample
+from synthetic import FakeDataset, make_T, random_world, sample  # noqa: F401
 
 # Driver log before coord_session existed (evaluator falls back to map ids) and the current one.
 LOG_HEADER = "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,tx,ty,tz,qx,qy,qz,qw\n"
@@ -89,6 +89,8 @@ def write_scenario(scenario, gt, frames, algo_dir):
         rows.append(f"{k},{frames[k]}")  # line truncated by the crash
     with open(algo_dir / "frame_log.csv", "w") as f:
         f.write(header + "".join(rows))
+    if scenario == "drift":
+        write_map_and_features(algo_dir, frames, random_world(1))
     if final is not None:
         ts, tr = final
         with open(algo_dir / "trajectory_euroc.txt", "w") as f:
@@ -97,6 +99,31 @@ def write_scenario(scenario, gt, frames, algo_dir):
         (algo_dir / "driver_status.json").write_text(json.dumps({"status": "completed"}))
         return 0
     return -signal.SIGSEGV
+
+
+MAP_POINTS_GT = np.random.default_rng(5).uniform(-6, 6, size=(40, 3))   # true positions (GT frame)
+
+
+def write_map_and_features(algo_dir, frames, T_world):
+    """Driver map/feature artifacts: map points in the final trajectory's world frame (T_world)."""
+    import struct
+    P = MAP_POINTS_GT @ T_world[:3, :3].T + T_world[:3, 3]
+    with open(algo_dir / "map_points.csv", "w") as f:
+        f.write("map_id,point_id,x,y,z,n_observations,in_final_frame\n")
+        for i, p in enumerate(P):
+            f.write(f"0,{i},{p[0]:.6f},{p[1]:.6f},{p[2]:.6f},3,1\n")
+        f.write("1,999,100.0,100.0,100.0,2,0\n")           # another map: no common frame
+    with open(algo_dir / "keyframes.csv", "w") as f:
+        f.write("map_id,keyframe_id,timestamp_ns,tx,ty,tz,qx,qy,qz,qw,in_final_frame\n")
+        f.write(f"0,0,{frames[0]},{P[0][0]},{P[0][1]},{P[0][2]},0,0,0,1,1\n")
+    with open(algo_dir / "features.bin", "wb") as f:
+        f.write(b"SBFEAT01")
+        for i, t in enumerate(frames[:20]):
+            st = [1] * 5 + [2] * 2 + [0] * 3
+            f.write(struct.pack("<qii", int(t), i, len(st)))
+            for k, v in enumerate(st):
+                f.write(struct.pack("<ffB", 10.0 + k, 20.0 + i, v))
+        f.write(struct.pack("<qii", int(frames[20]), 20, 10) + b"\x00" * 7)   # truncated by a "crash"
 
 
 class ScenarioOrbSlam3(OrbSlam3Adapter):

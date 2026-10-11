@@ -11,7 +11,7 @@ rd = pytest.importorskip("rerun.dataframe")
 
 from slambench.viz import rerun_export  # noqa: E402
 
-from test_online import register, run  # noqa: E402,F401  (fixture + scenario runner)
+from test_online import MAP_POINTS_GT, register, run  # noqa: E402,F401  (fixture + scenario runner)
 
 
 def _entities(path):
@@ -57,3 +57,35 @@ def test_raw_unaligned_fallback_is_labelled(tmp_path, monkeypatch):
     assert rep["sessions"]["online"] == [0, 1]   # map ids as sessions (legacy log without coord_session)
     ents = _entities(tmp_path / "raw.rrd")
     assert not any(e.startswith("/plots/error") for e in ents)
+
+
+def _column(path, entity, component, static=False):
+    tbl = rd.load_recording(str(path)).view(index=None if static else "frame",
+                                             contents=entity).select().read_all()
+    col = [c for c in tbl.column_names if component in c][0]
+    return [x for x in tbl[col].to_pylist() if x is not None]
+
+
+def test_sparse_map_lands_on_ground_truth_and_features_overlay(tmp_path):
+    import cv2
+    from slambench.artifacts import read_tracked_features
+    d, st, m = run(tmp_path, "drift")
+    out = json.loads((d / "algorithm_output.json").read_text())
+    assert set(out["artifacts"]) == {"tracked_features", "sparse_map_points", "sparse_map_keyframes"}
+    assert out["extra"]["sparse_map"] == {"n_points": 41, "n_points_in_final_frame": 40, "n_maps": 2}
+    feats, truncated = read_tracked_features(Path(out["artifacts"]["tracked_features"]))
+    assert truncated and len(feats) == 20
+    prep = json.loads((d / "prepared_input.json").read_text())["directory"]
+    left = Path(prep) / open(f"{prep}/frames.csv").read().splitlines()[1].split(",")[1]
+    left.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(left), np.zeros((40, 1280, 3), np.uint8))       # wider than max_width: scaled by 0.5
+    rep = rerun_export.export_run(d, tmp_path / "m.rrd", stride=1, log=lambda *_: None)
+    assert rep["map_points_shown"] == 40 and rep["features_frames"] == 20
+    pts = np.asarray(_column(tmp_path / "m.rrd", "/world/final/map_points", "Points3D:positions",
+                                static=True)[0])
+    assert np.allclose(pts, MAP_POINTS_GT, atol=1e-4)               # final alignment puts the map on GT
+    xy = np.asarray(_column(tmp_path / "m.rrd", "/camera/left/features", "Points2D:positions")[0])
+    assert np.allclose(xy[:, 0], (10.0 + np.arange(10)) * 0.5) and np.allclose(xy[:, 1], 10.0)
+    inl = np.concatenate([np.asarray(x) for x in _column(tmp_path / "m.rrd", "/plots/features/inliers",
+                                                          "Scalars:scalars")])
+    assert len(inl) == 20 and np.all(inl == 5)

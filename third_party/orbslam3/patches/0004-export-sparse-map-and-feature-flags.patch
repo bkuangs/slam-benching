@@ -1,0 +1,96 @@
+diff --git a/include/System.h b/include/System.h
+index f6888ca..78eb89a 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -190,6 +190,14 @@ public:
+         Eigen::Quaternionf q_w_origin = Eigen::Quaternionf::Identity();
+     };
+     MapFrameInfo GetCurrentMapFrameInfo();
++    // slam-benching patch: inlier/outlier flags of the features of the most recently tracked frame
++    // (Frame::mvbOutlier, same indexing as GetTrackedMapPoints). Call right after Track*().
++    std::vector<unsigned char> GetTrackedOutlierFlags();
++    // slam-benching patch: write the sparse map of every map in the atlas to <dir>/map_points.csv and
++    // <dir>/keyframes.csv. Points/keyframes of the map SaveTrajectoryEuRoC exports (most keyframes)
++    // are expressed in that trajectory's world frame (in_final_frame=1); other maps stay in their own
++    // frames (in_final_frame=0). Call after Shutdown(). Returns false if nothing could be written.
++    bool SaveSparseMapSlambench(const std::string &dir);
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+diff --git a/src/System.cc b/src/System.cc
+index beb7d64..7ca7250 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -1324,6 +1324,72 @@ long unsigned int System::GetCurrentMapId()
+     return pMap ? pMap->GetId() : 0;
+ }
+ 
++std::vector<unsigned char> System::GetTrackedOutlierFlags()
++{
++    // Tracking runs in the caller's thread, so mCurrentFrame is the frame just tracked.
++    const std::vector<bool> &out = mpTracker->mCurrentFrame.mvbOutlier;
++    return std::vector<unsigned char>(out.begin(), out.end());
++}
++
++bool System::SaveSparseMapSlambench(const std::string &dir)
++{
++    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
++    // Same map choice and world reference as SaveTrajectoryEuRoC (first map with the most keyframes).
++    Map* pBiggerMap = nullptr;
++    size_t numMaxKFs = 0;
++    for(Map* pMap : vpMaps)
++    {
++        if(pMap->GetAllKeyFrames().size() > numMaxKFs)
++        {
++            numMaxKFs = pMap->GetAllKeyFrames().size();
++            pBiggerMap = pMap;
++        }
++    }
++    Sophus::SE3f Tfw;  // final-trajectory world <- map world
++    if(pBiggerMap)
++    {
++        vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
++        sort(vpKFs.begin(), vpKFs.end(), KeyFrame::lId);
++        Sophus::SE3f Twb;
++        if (mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO || mSensor==IMU_RGBD)
++            Twb = vpKFs[0]->GetImuPose();
++        else
++            Twb = vpKFs[0]->GetPoseInverse();
++        Tfw = Twb.inverse();
++    }
++    ofstream fp((dir + "/map_points.csv").c_str());
++    ofstream fk((dir + "/keyframes.csv").c_str());
++    if(!fp.is_open() || !fk.is_open())
++        return false;
++    fp << "map_id,point_id,x,y,z,n_observations,in_final_frame\n" << fixed << setprecision(6);
++    fk << "map_id,keyframe_id,timestamp_ns,tx,ty,tz,qx,qy,qz,qw,in_final_frame\n" << fixed;
++    for(Map* pMap : vpMaps)
++    {
++        const bool inFinal = (pMap == pBiggerMap);
++        const Sophus::SE3f T = inFinal ? Tfw : Sophus::SE3f();
++        for(MapPoint* pMP : pMap->GetAllMapPoints())
++        {
++            if(!pMP || pMP->isBad())
++                continue;
++            const Eigen::Vector3f p = T * pMP->GetWorldPos();
++            fp << pMap->GetId() << "," << pMP->mnId << "," << p(0) << "," << p(1) << "," << p(2) << ","
++               << pMP->Observations() << "," << (inFinal ? 1 : 0) << "\n";
++        }
++        for(KeyFrame* pKF : pMap->GetAllKeyFrames())
++        {
++            if(!pKF || pKF->isBad())
++                continue;
++            const Sophus::SE3f Twc = T * pKF->GetPoseInverse();
++            const Eigen::Vector3f t = Twc.translation();
++            const Eigen::Quaternionf q = Twc.unit_quaternion();
++            fk << pMap->GetId() << "," << pKF->mnId << "," << setprecision(0) << 1e9 * pKF->mTimeStamp << ","
++               << setprecision(9) << t(0) << "," << t(1) << "," << t(2) << "," << q.x() << "," << q.y() << ","
++               << q.z() << "," << q.w() << "," << (inFinal ? 1 : 0) << "\n";
++        }
++    }
++    return true;
++}
++
+ System::MapFrameInfo System::GetCurrentMapFrameInfo()
+ {
+     MapFrameInfo info;

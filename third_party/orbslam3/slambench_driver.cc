@@ -7,7 +7,7 @@
 //
 // Usage:
 //   orbslam3_driver <vocabulary> <settings.yaml> <mode> <input_dir> <output_dir>
-//                   [--playback-rate R] [--clahe]
+//                   [--playback-rate R] [--clahe] [--log-features]
 //
 //   mode: stereo | stereo_inertial | mono | mono_inertial
 //   --playback-rate R : R > 0 throttles input to R x the recorded frame rate
@@ -15,6 +15,7 @@
 //   --clahe           : apply CLAHE(3.0, 8x8) (disabled by default). Colour input (BGR/BGRA as
 //                       loaded by cv::imread) is converted to grayscale first; other formats
 //                       are rejected (see slambench_preprocess.h).
+//   --log-features    : write features.bin (keypoints of every frame and their map-point status).
 //
 // Input (input_dir):
 //   frames.csv : timestamp_ns,left_path,right_path   (right_path empty for mono)
@@ -27,6 +28,12 @@
 //                         was being tracked, so its pose's frame is ambiguous.
 //   trajectory_euroc.txt  System::SaveTrajectoryEuRoC (largest map, final optimized poses)
 //   keyframes_euroc.txt   System::SaveKeyFrameTrajectoryEuRoC
+//   map_points.csv, keyframes.csv  sparse map of every atlas map at shutdown; rows with
+//                         in_final_frame=1 are in trajectory_euroc.txt's world frame
+//   features.bin          (--log-features) little-endian records, after the 8-byte magic "SBFEAT01":
+//                         int64 timestamp_ns, int32 frame_idx, int32 n, then n x
+//                         {float32 x, float32 y, uint8 status}; x,y = keypoint in the input image
+//                         (pixels); status 0 = no map point, 1 = matched inlier, 2 = matched outlier
 //   driver_status.json    exit status written by the driver itself
 
 #include <System.h>
@@ -39,6 +46,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -127,17 +135,18 @@ void WriteStatus(const string &path, const string &status, const string &message
 int main(int argc, char **argv) {
     if (argc < 6) {
         cerr << "Usage: orbslam3_driver <vocabulary> <settings.yaml> <mode> <input_dir> <output_dir>"
-                " [--playback-rate R] [--clahe]" << endl;
+                " [--playback-rate R] [--clahe] [--log-features]" << endl;
         return 2;
     }
     const string vocab = argv[1], settings = argv[2], mode = argv[3];
     const string input_dir = argv[4], output_dir = argv[5];
     double playback_rate = 0.0;
-    bool use_clahe = false;
+    bool use_clahe = false, log_features = false;
     for (int i = 6; i < argc; ++i) {
         string a = argv[i];
         if (a == "--playback-rate" && i + 1 < argc) playback_rate = atof(argv[++i]);
         else if (a == "--clahe") use_clahe = true;
+        else if (a == "--log-features") log_features = true;
         else { cerr << "Unknown argument: " << a << endl; return 2; }
     }
     const string status_path = output_dir + "/driver_status.json";
@@ -173,6 +182,12 @@ int main(int argc, char **argv) {
     log << "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,coord_session,"
            "tx,ty,tz,qx,qy,qz,qw\n";
     log << fixed;
+
+    ofstream feat;
+    if (log_features) {
+        feat.open(output_dir + "/features.bin", ios::binary);
+        feat.write("SBFEAT01", 8);
+    }
 
     size_t imu_idx = 0;
     if (inertial) {
@@ -248,6 +263,26 @@ int main(int argc, char **argv) {
         }
         log.flush();
 
+        if (log_features) {
+            const vector<cv::KeyPoint> kps = SLAM.GetTrackedKeyPointsUn();
+            const vector<ORB_SLAM3::MapPoint*> mps = SLAM.GetTrackedMapPoints();
+            const vector<unsigned char> outl = SLAM.GetTrackedOutlierFlags();
+            const int64_t ts = fr.t_ns;
+            const int32_t idx = static_cast<int32_t>(i), n = static_cast<int32_t>(kps.size());
+            feat.write(reinterpret_cast<const char *>(&ts), 8);
+            feat.write(reinterpret_cast<const char *>(&idx), 4);
+            feat.write(reinterpret_cast<const char *>(&n), 4);
+            for (int32_t k = 0; k < n; ++k) {
+                const float xy[2] = {kps[k].pt.x, kps[k].pt.y};
+                uint8_t st = 0;
+                if (k < static_cast<int32_t>(mps.size()) && mps[k] && !mps[k]->isBad())
+                    st = (k < static_cast<int32_t>(outl.size()) && outl[k]) ? 2 : 1;
+                feat.write(reinterpret_cast<const char *>(xy), 8);
+                feat.write(reinterpret_cast<const char *>(&st), 1);
+            }
+            if (i % 50 == 0) feat.flush();
+        }
+
         if (playback_rate > 0.0 && i + 1 < frames.size()) {
             const double target = (frames[i + 1].t_ns - frames[0].t_ns) * 1e-9 / playback_rate;
             const double elapsed = chrono::duration<double>(chrono::steady_clock::now() - wall_start).count();
@@ -258,6 +293,8 @@ int main(int argc, char **argv) {
     SLAM.Shutdown();
     SLAM.SaveTrajectoryEuRoC(output_dir + "/trajectory_euroc.txt");
     SLAM.SaveKeyFrameTrajectoryEuRoC(output_dir + "/keyframes_euroc.txt");
+    if (log_features) feat.close();
+    if (!SLAM.SaveSparseMapSlambench(output_dir)) cerr << "could not write sparse map" << endl;
     WriteStatus(status_path, "completed", "", frames.size(), fed);
     return 0;
 }

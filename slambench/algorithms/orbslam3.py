@@ -73,6 +73,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "clahe": False,                # preprocessing; disabled by default
     "playback_rate": 1.0,          # 1.0 = real-time throttled input, 0 = as fast as possible
     "imu_insert_kfs_when_lost": None,  # None -> ORB-SLAM3 default
+    "log_features": True,          # per-frame keypoints + map-point status (features.bin, ~10 KB/frame)
 }
 
 
@@ -275,6 +276,8 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 "--playback-rate", str(float(s["playback_rate"]))]
         if s["clahe"]:
             cmd.append("--clahe")
+        if s["log_features"]:
+            cmd.append("--log-features")
         return cmd
 
     # ---- outputs -----------------------------------------------------------
@@ -398,7 +401,23 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                     w.writerow([r["timestamp_ns"], TRACKING_STATES.get(st, str(st)), int(st in OK_STATES),
                                 r["map_id"] if r["map_id"] >= 0 else "", tt, int(r["timestamp_ns"] in final_ts),
                                 "" if r["coord_session"] is None else r["coord_session"]])
+        artifacts = {}
+        for key, name in (("tracked_features", "features.bin"), ("sparse_map_points", "map_points.csv"),
+                          ("sparse_map_keyframes", "keyframes.csv")):
+            if (d / name).exists() and (d / name).stat().st_size > 0:
+                artifacts[key] = d / name
+        if "sparse_map_points" in artifacts:
+            try:
+                from ..artifacts import read_sparse_map
+                mp = read_sparse_map(artifacts["sparse_map_points"])
+                extra["sparse_map"] = {"n_points": int(len(mp["xyz"])),
+                                       "n_points_in_final_frame": int(mp["in_final"].sum()),
+                                       "n_maps": int(len(set(mp["map_id"].tolist())))}
+            except Exception as exc:  # noqa: BLE001 - optional artifact; never fail collection
+                extra["sparse_map"] = {"error": f"{type(exc).__name__}: {exc}"}
         avail = {"tracking_state": bool(log_rows), "map_id": bool(log_rows),
+                 "tracked_features": "tracked_features" in artifacts,
+                 "sparse_map": "sparse_map_points" in artifacts,
                  "coordinate_session": any(r["coord_session"] is not None for r in log_rows),
                  "per_frame_time": bool(log_rows), "online_pose": bool(online)}
         extra.update({"n_frames_input": int(len(frames_ts)), "n_frames_logged": len(log_rows),
@@ -406,7 +425,7 @@ class OrbSlam3Adapter(AlgorithmAdapter):
 
         common = dict(trajectory=traj_path, estimate_frame=self.estimate_frame(ctx.mode),
                       frame_diagnostics=diag_path, diagnostics_available=avail, extra=extra,
-                      trajectories=trajectories)
+                      trajectories=trajectories, artifacts=artifacts)
         if timed_out:
             return AlgorithmOutput(RunStatus.TIMEOUT, "execution timed out", **common)
         if returncode is None or returncode != 0:

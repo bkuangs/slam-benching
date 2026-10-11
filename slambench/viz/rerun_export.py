@@ -1,7 +1,8 @@
 """Export a completed run directory to a Rerun recording (.rrd) for synchronized replay.
 
-Panels: camera images, aligned 3D trajectories (ground truth, final, one path per online coordinate
-session), tracking events, and time series (position error, tracking state, tracking time).
+Panels: camera images (with the estimator's tracked features if it logged them), aligned 3D
+trajectories (ground truth, final, one path per online coordinate session) with the final sparse map,
+tracking events, and time series (position error, tracking state, feature counts, tracking time).
 
 Positions are drawn exactly as the evaluator scored them: each coordinate session is aligned on its
 own (``evaluate_sessions``), sessions are separate paths, and no path is drawn across a session
@@ -28,6 +29,9 @@ GT_COLOR = [150, 150, 150]
 FINAL_COLOR = [220, 50, 47]
 SESSION_COLORS = [[38, 139, 210], [133, 153, 0], [108, 113, 196], [181, 137, 0], [42, 161, 152],
                   [211, 54, 130], [203, 75, 22]]
+MAP_COLOR = [255, 170, 60]
+KEYFRAME_COLOR = [140, 20, 20]
+FEATURE_COLORS = {0: [120, 160, 255], 1: [0, 210, 0], 2: [255, 140, 0]}   # unmatched, inlier, outlier
 BAD_STATES = {"lost", "recently_lost"}
 PREFETCH = 64
 
@@ -58,6 +62,7 @@ def _load_run(run_dir: Path) -> Dict[str, Any]:
     out_path = run_dir / "algorithm_output.json"
     out = json.loads(out_path.read_text()) if out_path.exists() else {}
     run["trajectories"] = {t.kind: t for t in trajectories_from_output_json(out)}
+    run["artifacts"] = {k: Path(v) for k, v in (out.get("artifacts") or {}).items() if Path(v).exists()}
     diag_path = out.get("frame_diagnostics")
     run["diag"] = FrameDiagnostics.read(Path(diag_path)) if diag_path and Path(diag_path).exists() else None
     return run
@@ -97,7 +102,8 @@ def _sessions_to_draw(run: Dict[str, Any], aligned: Dict[str, Any], kind: str):
         sv = s.get("_series")
         if sv is not None:
             out.append({"label": s["session"], "t_ns": sv["t_ns"], "pos": sv["est_pos"], "gt_pos": sv["gt_pos"],
-                        "err": sv["trans_err"], "segment": sv["segment"], "aligned": True})
+                        "err": sv["trans_err"], "segment": sv["segment"], "aligned": True,
+                        "alignment": s["alignment"]})
     if out or kind not in run["trajectories"]:
         return out
     # No aligned series (no GT, unknown extrinsic, too few matches): raw poses per session.
@@ -110,28 +116,38 @@ def _sessions_to_draw(run: Dict[str, Any], aligned: Dict[str, Any], kind: str):
     split, _, _ = split_sessions(traj, t.coordinate_sessions, run["diag"])
     for label, idx in split:
         out.append({"label": label, "t_ns": traj.timestamps_ns[idx], "pos": traj.positions[idx],
-                    "gt_pos": None, "err": None, "segment": None, "aligned": False})
+                    "gt_pos": None, "err": None, "segment": None, "aligned": False, "alignment": None})
     return out
 
 
-def _encode(path: Path, quality: int, max_width: int) -> Optional[bytes]:
+def _encode(path: Path, quality: int, max_width: int):
+    """(JPEG bytes, scale applied to the image) or None."""
     import cv2
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
         return None
+    scale = 1.0
     if img.dtype != np.uint8:
         img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     if img.ndim == 3 and img.shape[2] == 4:
         img = img[:, :, :3]
     if max_width and img.shape[1] > max_width:
-        h = int(round(img.shape[0] * max_width / img.shape[1]))
+        scale = max_width / img.shape[1]
+        h = int(round(img.shape[0] * scale))
         img = cv2.resize(img, (max_width, h), interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
-    return buf.tobytes() if ok else None
+    return (buf.tobytes(), scale) if ok else None
+
+
+def _apply_alignment(xyz: np.ndarray, alignment: Optional[Dict[str, Any]]) -> np.ndarray:
+    if not alignment or len(xyz) == 0:
+        return xyz
+    R, t, s = np.asarray(alignment["R"]), np.asarray(alignment["t"]), float(alignment["scale"])
+    return s * xyz @ R.T + t
 
 
 def _info_markdown(run: Dict[str, Any], aligned: Dict[str, Any], drawn: Dict[str, list], stride: int,
-                   n_missing: int) -> str:
+                   n_missing: int, extras: List[str]) -> str:
     st, cfg = run["status"], run["cfg"]
     lines = [f"# {cfg.get('name', '')}",
              f"**{cfg['algorithm']['name']} {cfg['algorithm']['mode']}** on "
@@ -167,6 +183,8 @@ def _info_markdown(run: Dict[str, Any], aligned: Dict[str, Any], drawn: Dict[str
                          f"{(i['first_rel_s'] or 0):.1f} s for {i['span_s']:.1f} s; "
                          + (f"ATE {e['rmse']:.3f} m" if e.get("rmse") is not None else "not aligned")
                          + ("" if s.get("included_in_pooled") else " (not pooled)"))
+    if extras:
+        lines += ["", "## Map and features"] + extras
     if aligned.get("note"):
         lines += ["", f"_{aligned['note']}_"]
     return "\n".join(lines)
@@ -184,8 +202,9 @@ def _blueprint(stereo: bool):
             rrb.Vertical(rrb.Spatial3DView(origin="/world", name="trajectories (aligned per session)"),
                          rrb.TimeSeriesView(origin="/plots/error", name="position error [m]"),
                          rrb.TimeSeriesView(origin="/plots/tracking", name="tracking"),
+                         rrb.TimeSeriesView(origin="/plots/features", name="features per frame"),
                          rrb.TimeSeriesView(origin="/plots/timing", name="tracking time [ms]"),
-                         row_shares=[4, 2, 1, 1]),
+                         row_shares=[4, 2, 1, 1, 1]),
             column_shares=[2, 3]))
 
 
@@ -256,6 +275,10 @@ def export_run(run_dir: Path, out_path: Optional[Path] = None, stride: int = 2, 
                 series(path, s["t_ns"], s["err"], points(color, f"online s{sid}" if kind == "online" else "final"))
         current[kind] = cur
 
+    extras: List[str] = []
+    map_shown = _log_sparse_map(rec, rr, run, drawn.get("final") or [], extras)
+    features = _load_features(run, extras)
+
     # ---- tracking diagnostics and events ----
     diag = run["diag"]
     if diag is not None:
@@ -275,6 +298,13 @@ def export_run(run_dir: Path, out_path: Optional[Path] = None, stride: int = 2, 
             series("/plots/timing/frame_period_ms", ts[[0, -1]], [period, period],
                    rr.SeriesLines(colors=[[0, 0, 0]], names=["frame period"]))
         _log_events(rec, rr, diag, rel, frame_of)
+    if features:
+        t_f = np.array(sorted(features), dtype=np.int64)
+        st = [features[t][1] for t in t_f.tolist()]
+        for name, col, val in (("keypoints", FEATURE_COLORS[0], [len(x) for x in st]),
+                               ("inliers", FEATURE_COLORS[1], [int((x == 1).sum()) for x in st]),
+                               ("outliers", FEATURE_COLORS[2], [int((x == 2).sum()) for x in st])):
+            series(f"/plots/features/{name}", t_f, val, rr.SeriesLines(colors=[col], names=[name]))
 
     # ---- per-frame current-pose markers and images, in time order ----
     img_idx = list(range(0, len(run["frames"]), stride)) if images else []
@@ -310,26 +340,76 @@ def export_run(run_dir: Path, out_path: Optional[Path] = None, stride: int = 2, 
             rec.log("/world/ground_truth_now", rr.Clear(recursive=False))
         if i in pending:
             for side, fut in pending.pop(i):
-                data = fut.result()
-                if data is None:
+                res = fut.result()
+                if res is None:
                     n_missing += 1
                     continue
+                data, scale = res
                 rec.log(f"/camera/{side}", rr.EncodedImage(contents=data, media_type="image/jpeg"))
                 n_img += 1
+                if side == "left" and features:
+                    f = features.get(t)
+                    if f is None or len(f[0]) == 0:
+                        rec.log("/camera/left/features", rr.Clear(recursive=False))
+                    else:
+                        rec.log("/camera/left/features", rr.Points2D(
+                            f[0] * scale, colors=[FEATURE_COLORS.get(int(x), [255, 255, 255]) for x in f[1]],
+                            radii=2.0))
             submit(next_n)
             next_n += 1
     if pool is not None:
         pool.shutdown()
 
-    rec.log("/info", rr.TextDocument(_info_markdown(run, aligned, drawn, stride, n_missing),
+    rec.log("/info", rr.TextDocument(_info_markdown(run, aligned, drawn, stride, n_missing, extras),
                                      media_type=rr.MediaType.MARKDOWN), static=True)
     rec.flush()
     rec.disconnect()
     return {"out": str(out_path), "n_frames": int(len(ts)), "n_images": n_img, "n_images_missing": n_missing,
             "sessions": {k: [s["label"].get("session_id") for s in v] for k, v in drawn.items()},
             "aligned": {k: bool(v) and v[0]["aligned"] for k, v in drawn.items()},
+            "map_points_shown": map_shown, "features_frames": len(features),
             "size_mb": round(out_path.stat().st_size / 2 ** 20, 2), "rerun_version": rr.__version__,
             "note": aligned.get("note")}
+
+
+def _log_sparse_map(rec, rr, run: Dict[str, Any], final_sessions: list, extras: List[str]) -> int:
+    """Final sparse map in the final trajectory's (aligned) frame; other maps are only counted."""
+    from ..artifacts import read_sparse_map
+    pts_csv = run["artifacts"].get("sparse_map_points")
+    if pts_csv is None:
+        extras.append("* sparse map: not exported by this run")
+        return 0
+    m = read_sparse_map(pts_csv, run["artifacts"].get("sparse_map_keyframes"))
+    sel = m["in_final"]
+    other = int((~sel).sum())
+    if not final_sessions:
+        extras.append(f"* sparse map: {int(sel.sum())} points not shown (no final trajectory to place them)")
+        return 0
+    al = final_sessions[0]["alignment"]
+    how = "aligned like the final trajectory" if al else "raw and unaligned, like the final trajectory"
+    xyz = _apply_alignment(m["xyz"][sel], al)
+    rec.log("/world/final/map_points", rr.Points3D(xyz, colors=[MAP_COLOR], radii=0.015), static=True)
+    if "kf_xyz" in m:
+        ksel = m["kf_in_final"]
+        rec.log("/world/final/keyframes", rr.Points3D(_apply_alignment(m["kf_xyz"][ksel], al),
+                                                      colors=[KEYFRAME_COLOR], radii=0.03), static=True)
+    extras.append(f"* sparse map: {len(xyz)} points of the exported map in orange, keyframes in dark red "
+                  f"({how}; same scale caveat for monocular)"
+                  + (f"; {other} points of other maps not shown (no common frame)" if other else ""))
+    return int(len(xyz))
+
+
+def _load_features(run: Dict[str, Any], extras: List[str]) -> Dict[int, Any]:
+    from ..artifacts import read_tracked_features
+    path = run["artifacts"].get("tracked_features")
+    if path is None:
+        extras.append("* tracked features: not logged by this run")
+        return {}
+    feats, truncated = read_tracked_features(path)
+    extras.append(f"* tracked features on the left image: green = matched to a map point, orange = matched "
+                  f"but rejected as outlier, blue = no map point ({len(feats)} frames"
+                  + (", file truncated" if truncated else "") + ")")
+    return feats
 
 
 def _log_events(rec, rr, diag, rel, frame_of) -> None:

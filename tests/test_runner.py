@@ -85,7 +85,10 @@ def test_orbslam3_settings_file_for_rectified_stereo(tmp_path):
     assert 'Camera.type: "Rectified"' in text and "Stereo.b: 0.12" in text
     assert "Camera.fps: 15" in text and "loopClosing: 0" in text
     cmd = a.command(ctx)
-    assert cmd[-2:] == ["--playback-rate", "1.0"] and "--clahe" not in cmd
+    assert cmd[cmd.index("--playback-rate") + 1] == "1.0" and "--clahe" not in cmd
+    assert "--log-features" in cmd
+    ctx.settings["log_features"] = False
+    assert "--log-features" not in a.command(ctx)
 
 
 def test_crash_is_reported_and_batch_summary_lists_failures(tmp_path):

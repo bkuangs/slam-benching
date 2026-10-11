@@ -77,6 +77,10 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   `per_frame` when each pose is in the world frame given per frame by the diagnostics column
   `coordinate_session`, -1 = ambiguous; `map_id` to use map ids) and `keyframe_only`.
   The legacy `trajectory`/`estimate_frame` fields are read as the final trajectory.
+* `AlgorithmOutput.artifacts` (optional): `tracked_features` (`features.bin`: per-frame keypoints in
+  input-image pixels with status unmatched / inlier / outlier), `sparse_map_points`
+  (`map_points.csv`) and `sparse_map_keyframes` (`keyframes.csv`); rows with `in_final_frame=1` are
+  in the final trajectory's world frame. Formats: `slambench/artifacts.py`. Used by the replay viewer.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory
