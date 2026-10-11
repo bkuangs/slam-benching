@@ -51,6 +51,9 @@ ACCURACY_LABEL = ("aligned benchmark accuracy: the alignment is fitted over each
                   "emitted; it measures trajectory shape/consistency, not a causal real-time error")
 
 
+UNKNOWN_SESSION = -999
+
+
 def unavailable(reason: str) -> Dict[str, Any]:
     return {"available": False, "reason": reason}
 
@@ -75,15 +78,18 @@ class FrameDiagnostics:
     map_id: np.ndarray           # int, -1 if unknown
     track_time_s: np.ndarray     # float, nan if unknown
     in_final: np.ndarray         # bool
+    coordinate_session: Optional[np.ndarray] = None   # int; -1 ambiguous, UNKNOWN_SESSION unknown
 
     @classmethod
     def read(cls, path: Path) -> "FrameDiagnostics":
         with open(path) as f:
             rows = list(csv.DictReader(f))
-        g = lambda k, conv, default: np.array([conv(r[k]) if r.get(k, "") != "" else default for r in rows])
+        g = lambda k, conv, default: np.array([conv(r[k]) if r.get(k) not in (None, "") else default
+                                               for r in rows])
         return cls(g("timestamp_ns", int, 0).astype(np.int64), g("tracking_state", str, ""),
                    g("tracking_ok", int, 0).astype(bool), g("map_id", int, -1).astype(int),
-                   g("track_time_s", float, np.nan).astype(float), g("in_final_trajectory", int, 0).astype(bool))
+                   g("track_time_s", float, np.nan).astype(float), g("in_final_trajectory", int, 0).astype(bool),
+                   g("coordinate_session", int, UNKNOWN_SESSION).astype(int))
 
 
 def coverage_from_states(diag: FrameDiagnostics, input_ts: np.ndarray) -> Dict[str, Any]:
@@ -390,26 +396,46 @@ def evaluate_trajectory(est: Trajectory, gt: Trajectory, cfg: Dict[str, Any],
 # coordinate sessions (independent map frames)
 # ----------------------------------------------------------------------------
 def split_sessions(traj: Trajectory, coordinate_sessions: str, diag: Optional[FrameDiagnostics]):
-    """[(map_id or None, sample indices)] in order of first appearance, plus a note.
+    """Coordinate sessions of a trajectory: ([(label, sample indices)], note, n_ambiguous).
 
-    ``map_id``: every pose belongs to the session of the estimator map active when it was emitted;
-    each map has its own world frame, so sessions are aligned and scored independently and RPE
-    never pairs samples from different maps.
+    ``per_frame``: the estimator reports, per frame, which world frame its pose is in
+    (frame_diagnostics coordinate_session). Each session is aligned and scored on its own and RPE
+    never pairs samples from different sessions; frames marked -1 (frame changed while the frame
+    was processed) are excluded. Without that column, map ids are used (with a note), which cannot
+    see frame changes that keep the map id (e.g. ORB-SLAM3 map merges).
+    ``map_id``: sessions are map ids. ``single``: one session.
     """
     if coordinate_sessions == "single":
-        return [(None, np.arange(len(traj)))], None
-    if diag is None or np.all(diag.map_id < 0):
-        return ([(None, np.arange(len(traj)))],
-                "map ids unavailable: poses assumed to share one coordinate frame")
+        return [({"session_id": 0, "map_ids": None}, np.arange(len(traj)))], None, 0
+    if diag is None:
+        return ([({"session_id": 0, "map_ids": None}, np.arange(len(traj)))],
+                "no frame diagnostics: poses assumed to share one coordinate frame", 0)
+    ts = traj.timestamps_ns.tolist()
     map_by_ts = dict(zip(diag.timestamps_ns.tolist(), diag.map_id.tolist()))
-    ids = np.array([map_by_ts.get(int(t), -1) for t in traj.timestamps_ns.tolist()])
-    out = []
-    for m in dict.fromkeys(ids.tolist()):
-        out.append((int(m), np.nonzero(ids == m)[0]))
+    maps = np.array([map_by_ts.get(int(t), -1) for t in ts])
     note = None
-    if any(m == -1 for m, _ in out):
-        note = "some poses have no map id in the frame diagnostics; they form session -1"
-    return out, note
+    sess = None
+    if coordinate_sessions == "per_frame" and diag.coordinate_session is not None:
+        cs_by_ts = dict(zip(diag.timestamps_ns.tolist(), diag.coordinate_session.tolist()))
+        cs = np.array([cs_by_ts.get(int(t), UNKNOWN_SESSION) for t in ts])
+        if len(cs) and not np.any(cs == UNKNOWN_SESSION):
+            sess = cs
+    if sess is None:
+        if coordinate_sessions == "per_frame":
+            note = ("estimator did not report coordinate sessions; map ids used instead (frame changes "
+                    "that keep the map id, e.g. ORB-SLAM3 map merges, are not detected)")
+        if np.all(maps < 0):
+            return ([({"session_id": 0, "map_ids": None}, np.arange(len(traj)))],
+                    "map ids unavailable: poses assumed to share one coordinate frame", 0)
+        sess = maps
+    n_amb = int(np.sum(sess == -1)) if sess is not maps else 0
+    out = []
+    for sid in dict.fromkeys(sess.tolist()):
+        if sid == -1 and sess is not maps:
+            continue
+        idx = np.nonzero(sess == sid)[0]
+        out.append(({"session_id": int(sid), "map_ids": sorted(set(int(m) for m in maps[idx]))}, idx))
+    return out, note, n_amb
 
 
 def _concat(parts, key):
@@ -429,15 +455,15 @@ def evaluate_sessions(traj: Trajectory, gt: Trajectory, cfg: Dict[str, Any], coo
     c = dict(DEFAULT_EVAL)
     c.update(cfg or {})
     traj = traj.sorted_unique()
-    split, note = split_sessions(traj, coordinate_sessions, diag)
+    split, note, n_ambiguous = split_sessions(traj, coordinate_sessions, diag)
     in_ts = np.asarray(input_ts) if input_ts is not None else None
     in_dur = float((in_ts[-1] - in_ts[0]) * 1e-9) if in_ts is not None and len(in_ts) > 1 else None
     sessions, pooled_parts = [], []
-    for map_id, idx in split:
+    for label, idx in split:
         sub = traj.subset(idx)
         r = evaluate_trajectory(sub, gt, c, diag, input_ts, scale_ambiguous)
         span = float((sub.timestamps_ns[-1] - sub.timestamps_ns[0]) * 1e-9) if len(sub) else 0.0
-        info = {"map_id": map_id, "n_poses": int(len(sub)),
+        info = {**label, "n_poses": int(len(sub)),
                 "first_rel_s": float((sub.timestamps_ns[0] - in_ts[0]) * 1e-9) if in_ts is not None else None,
                 "span_s": span, "span_fraction_of_input": span / in_dur if in_dur else None}
         n_m = r["association"]["n_matched"]
@@ -458,6 +484,7 @@ def evaluate_sessions(traj: Trajectory, gt: Trajectory, cfg: Dict[str, Any], coo
         "n_sessions": len(sessions), "n_sessions_pooled": len(pooled_parts),
         "n_poses_in_unpooled_sessions": int(sum(r["session"]["n_poses"] for r in sessions
                                                 if not r["included_in_pooled"])),
+        "n_poses_ambiguous_frame": n_ambiguous,
         "sessions": sessions}
     if note:
         res["session_note"] = note
@@ -481,8 +508,9 @@ def evaluate_sessions(traj: Trajectory, gt: Trajectory, cfg: Dict[str, Any], coo
                       "rot_err": _concat(series, "rot_err"), "segment": np.concatenate(segs),
                       "session": sess_idx}
     res["alignment"] = {"type": c["alignment"], "label": pooled_parts[0]["alignment"]["label"]
-                        + (" (fitted independently per map session)" if len(split) > 1 else ""),
-                        "per_session": [{"map_id": r["session"]["map_id"], "scale": r["alignment"]["scale"]}
+                        + (" (fitted independently per coordinate session)" if len(split) > 1 else ""),
+                        "per_session": [{"session_id": r["session"]["session_id"],
+                                         "map_ids": r["session"]["map_ids"], "scale": r["alignment"]["scale"]}
                                         for r in pooled_parts]}
     if len(pooled_parts) == 1:
         res["alignment"]["scale"] = pooled_parts[0]["alignment"]["scale"]
@@ -493,7 +521,7 @@ def evaluate_sessions(traj: Trajectory, gt: Trajectory, cfg: Dict[str, Any], coo
     largest = max(pooled_parts, key=lambda r: r["association"]["n_matched"])
     if "diagnostics" in largest:
         res["diagnostics"] = dict(largest["diagnostics"])
-        res["diagnostics"]["from_session_map_id"] = largest["session"]["map_id"]
+        res["diagnostics"]["from_session_id"] = largest["session"]["session_id"]
     ev = [r["evaluated_coverage"] for r in pooled_parts]
     evc = {"n_matched_samples": int(sum(e["n_matched_samples"] for e in ev)),
            "n_segments": int(sum(e["n_segments"] for e in ev)),

@@ -1,0 +1,60 @@
+diff --git a/include/System.h b/include/System.h
+index ba19c4d..f6888ca 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -176,6 +176,20 @@ public:
+     int GetTrackingState();
+     // slam-benching patch: expose active Atlas map id for per-frame diagnostics.
+     long unsigned int GetCurrentMapId();
++    // slam-benching patch: identity of the coordinate frame of the active map. A pose's world
++    // frame is the active map's frame; it changes when the active map object changes (new map,
++    // merge: the merged map takes over the old id) or when the map is re-expressed in place
++    // (ApplyScaledRotation: IMU initialisation / inertial merge), which moves the origin keyframe.
++    // Loop closure and bundle adjustment keep the origin keyframe fixed.
++    struct MapFrameInfo {
++        const void* map = nullptr;      // active Map object
++        long unsigned int map_id = 0;
++        bool has_origin = false;        // false until the map has a keyframe
++        long unsigned int origin_kf_id = 0;
++        Eigen::Vector3f t_w_origin = Eigen::Vector3f::Zero();
++        Eigen::Quaternionf q_w_origin = Eigen::Quaternionf::Identity();
++    };
++    MapFrameInfo GetCurrentMapFrameInfo();
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+diff --git a/src/System.cc b/src/System.cc
+index cd8e84f..beb7d64 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -1324,6 +1324,30 @@ long unsigned int System::GetCurrentMapId()
+     return pMap ? pMap->GetId() : 0;
+ }
+ 
++System::MapFrameInfo System::GetCurrentMapFrameInfo()
++{
++    MapFrameInfo info;
++    Map* pMap = mpAtlas->GetCurrentMap();
++    if(!pMap)
++        return info;
++    info.map = pMap;
++    info.map_id = pMap->GetId();
++    // mpKFinitial is only assigned once the map has a keyframe (never freed afterwards).
++    if(pMap->KeyFramesInMap() > 0)
++    {
++        KeyFrame* pKF = pMap->GetOriginKF();
++        if(pKF)
++        {
++            const Sophus::SE3f Twc = pKF->GetPoseInverse();
++            info.has_origin = true;
++            info.origin_kf_id = pKF->mnId;
++            info.t_w_origin = Twc.translation();
++            info.q_w_origin = Twc.unit_quaternion();
++        }
++    }
++    return info;
++}
++
+ int System::GetTrackingState()
+ {
+     unique_lock<mutex> lock(mMutexState);

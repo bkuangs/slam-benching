@@ -21,7 +21,10 @@
 //   imu.csv    : timestamp_ns,wx,wy,wz,ax,ay,az      (rad/s, m/s^2; inertial modes only)
 //
 // Output (output_dir):
-//   frame_log.csv         per-frame tracking diagnostics (flushed every frame)
+//   frame_log.csv         per-frame tracking diagnostics and online pose (flushed every frame).
+//                         coord_session numbers the coordinate frame the online pose is expressed
+//                         in (see SameCoordinateFrame); -1 = the frame changed while this frame
+//                         was being tracked, so its pose's frame is ambiguous.
 //   trajectory_euroc.txt  System::SaveTrajectoryEuRoC (largest map, final optimized poses)
 //   keyframes_euroc.txt   System::SaveKeyFrameTrajectoryEuRoC
 //   driver_status.json    exit status written by the driver itself
@@ -34,6 +37,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -96,6 +100,18 @@ bool LoadImu(const string &path, vector<long long> &t_ns, vector<ORB_SLAM3::IMU:
 
 slambench::PreprocessStats g_pre;
 
+// Same world frame: same Map object and id, and the origin keyframe unchanged (loop closure and
+// bundle adjustment keep it fixed; merges switch the Map object; in-place re-expression such as
+// IMU initialisation moves it).
+bool SameCoordinateFrame(const ORB_SLAM3::System::MapFrameInfo &a, const ORB_SLAM3::System::MapFrameInfo &b) {
+    if (a.map != b.map || a.map_id != b.map_id || a.has_origin != b.has_origin) return false;
+    if (!a.has_origin) return true;
+    if (a.origin_kf_id != b.origin_kf_id) return false;
+    const float dt = (a.t_w_origin - b.t_w_origin).norm();
+    const float scale = std::max(1.0f, a.t_w_origin.norm());
+    return dt <= 1e-4f * scale && a.q_w_origin.angularDistance(b.q_w_origin) <= 1e-4f;
+}
+
 void WriteStatus(const string &path, const string &status, const string &message,
                  size_t n_frames_total, size_t n_frames_fed) {
     ofstream f(path);
@@ -154,7 +170,7 @@ int main(int argc, char **argv) {
     cv::Ptr<cv::CLAHE> clahe = slambench::MakeClahe();
 
     ofstream log(output_dir + "/frame_log.csv");
-    log << "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,"
+    log << "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,coord_session,"
            "tx,ty,tz,qx,qy,qz,qw\n";
     log << fixed;
 
@@ -166,6 +182,9 @@ int main(int argc, char **argv) {
 
     const auto wall_start = chrono::steady_clock::now();
     size_t fed = 0;
+    long coord_session = 0;
+    bool have_frame_info = false;
+    ORB_SLAM3::System::MapFrameInfo last_frame_info;
     for (size_t i = 0; i < frames.size(); ++i) {
         const auto &fr = frames[i];
         cv::Mat im_l = cv::imread(input_dir + "/" + fr.left, cv::IMREAD_UNCHANGED);
@@ -198,6 +217,7 @@ int main(int argc, char **argv) {
         }
 
         const double t = fr.t_ns * 1e-9;
+        const ORB_SLAM3::System::MapFrameInfo info_before = SLAM.GetCurrentMapFrameInfo();
         const auto t0 = chrono::steady_clock::now();
         Sophus::SE3f Tcw;
         if (stereo) Tcw = SLAM.TrackStereo(im_l, im_r, t, imu_batch);
@@ -207,10 +227,15 @@ int main(int argc, char **argv) {
         ++fed;
 
         const int state = SLAM.GetTrackingState();
-        const unsigned long map_id = SLAM.GetCurrentMapId();
+        const ORB_SLAM3::System::MapFrameInfo info = SLAM.GetCurrentMapFrameInfo();
+        const unsigned long map_id = info.map_id;
         const bool map_changed = SLAM.MapChanged();
+        if (have_frame_info && !SameCoordinateFrame(last_frame_info, info)) ++coord_session;
+        have_frame_info = true;
+        last_frame_info = info;
+        const long frame_session = SameCoordinateFrame(info_before, info) ? coord_session : -1;
         log << i << "," << fr.t_ns << "," << state << "," << map_id << "," << (map_changed ? 1 : 0)
-            << "," << setprecision(6) << track_s;
+            << "," << setprecision(6) << track_s << "," << frame_session;
         // Online (not final-optimized) camera pose; only meaningful while tracking is OK.
         if (state == 2 || state == 5) {
             const Sophus::SE3f Twc = Tcw.inverse();

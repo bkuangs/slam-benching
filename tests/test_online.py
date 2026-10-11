@@ -28,7 +28,10 @@ from slambench.types import SensorMode
 
 from synthetic import FakeDataset, make_T, random_world, sample
 
+# Driver log before coord_session existed (evaluator falls back to map ids) and the current one.
 LOG_HEADER = "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,tx,ty,tz,qx,qy,qz,qw\n"
+LOG_HEADER_SESSIONS = ("frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,coord_session,"
+                       "tx,ty,tz,qx,qy,qz,qw\n")
 
 
 def _world_poses(gt, ts, T_world):
@@ -36,8 +39,8 @@ def _world_poses(gt, ts, T_world):
     return sample(gt, ts).transformed(T_left=T_world)
 
 
-def _row(i, t, state, map_id, pose=None):
-    s = f"{i},{t},{state},{map_id},0,0.010000"
+def _row(i, t, state, map_id, pose=None, session=None):
+    s = f"{i},{t},{state},{map_id},0,0.010000" + ("" if session is None else f",{session}")
     if pose is None:
         return s + ",,,,,,,\n"
     p, q = pose
@@ -49,7 +52,7 @@ def write_scenario(scenario, gt, frames, algo_dir):
     algo_dir.mkdir(parents=True, exist_ok=True)
     W1, W2 = random_world(1), random_world(2)
     n = len(frames)
-    rows, final = [], None
+    rows, final, header = [], None, LOG_HEADER
     if scenario == "drift":
         # Online poses drift linearly (0.05 m/s along world x); the final export is exact.
         on = _world_poses(gt, frames, W1)
@@ -66,6 +69,17 @@ def write_scenario(scenario, gt, frames, algo_dir):
             src, k = (a, i) if i < h else (b, i - h)
             rows.append(_row(i, t, 2, 0 if i < h else 1, (src.positions[k], src.quaternions_xyzw[k])))
         final = (frames[h:], b)
+    elif scenario == "merge":
+        # ORB-SLAM3 map merge: the map id stays 0 but the world frame changes at frame h; the merge
+        # completed while frame h was tracked, so the driver marks that frame ambiguous (-1).
+        header = LOG_HEADER_SESSIONS
+        h = n // 2
+        a, b = _world_poses(gt, frames[:h], W1), _world_poses(gt, frames[h:], W2)
+        for i, t in enumerate(frames):
+            src, k = (a, i) if i < h else (b, i - h)
+            sess = 0 if i < h else (-1 if i == h else 1)
+            rows.append(_row(i, t, 2, 0, (src.positions[k], src.quaternions_xyzw[k]), session=sess))
+        final = (frames, _world_poses(gt, frames, W2))
     elif scenario == "crash":
         # 60 % of the frames tracked exactly, then a segfault mid-write: no final trajectory.
         k = int(0.6 * n)
@@ -74,7 +88,7 @@ def write_scenario(scenario, gt, frames, algo_dir):
             rows.append(_row(i, frames[i], 2, 0, (on.positions[i], on.quaternions_xyzw[i])))
         rows.append(f"{k},{frames[k]}")  # line truncated by the crash
     with open(algo_dir / "frame_log.csv", "w") as f:
-        f.write(LOG_HEADER + "".join(rows))
+        f.write(header + "".join(rows))
     if final is not None:
         ts, tr = final
         with open(algo_dir / "trajectory_euroc.txt", "w") as f:
@@ -148,7 +162,8 @@ def test_map_reset_sessions_aligned_separately_and_rpe_not_across_maps(tmp_path)
     assert st["status"] == "success"
     on = m["accuracy"]["online"]
     assert on["n_sessions"] == on["n_sessions_pooled"] == 2
-    assert [s["session"]["map_id"] for s in on["sessions"]] == [0, 1]
+    assert [s["session"]["map_ids"] for s in on["sessions"]] == [[0], [1]]
+    assert "map ids used instead" in on["session_note"]
     assert [s["session"]["n_poses"] for s in on["sessions"]] == [150, 150]
     assert on["sessions"][0]["session"]["span_fraction_of_input"] == pytest.approx(149 / 299)
     assert on["ate"]["translation_m"]["rmse"] < 1e-5
@@ -161,6 +176,7 @@ def test_map_reset_sessions_aligned_separately_and_rpe_not_across_maps(tmp_path)
     gt = FakeDataset(tmp_path, "s1").gt
     wrong = evaluate_sessions(online, gt, {"association_max_dt_s": 0.005}, "single")
     assert wrong["ate"]["translation_m"]["rmse"] > 1.0
+    assert wrong["n_sessions"] == 1
     # final export holds only the largest map (one coordinate frame)
     assert m["accuracy"]["final"]["n_sessions"] == 1
     assert m["coverage"]["n_maps"] == 2
@@ -201,7 +217,7 @@ def test_online_and_final_frames_differ_for_inertial_modes(tmp_path):
     write_scenario("drift", ds.gt, ds.frames, ctx.algo_dir)
     out = algo.collect(ctx, 0, False)
     frames = {t.kind: (t.frame, t.coordinate_sessions) for t in out.all_trajectories()}
-    assert frames == {"online": ("cam0", "map_id"), "final": ("imu", "single")}
+    assert frames == {"online": ("cam0", "per_frame"), "final": ("imu", "single")}
 
 
 def test_frame_log_rows_without_valid_pose_are_not_online_poses(tmp_path):
@@ -213,3 +229,24 @@ def test_frame_log_rows_without_valid_pose_are_not_online_poses(tmp_path):
                  + _row(4, 50, 4, 0))
     rows, bad = OrbSlam3Adapter.read_frame_log(p)
     assert bad == 0 and [r["pose"] is not None for r in rows] == [True, False, False, False, False]
+
+
+def test_frame_change_inside_one_map_id_starts_a_new_session(tmp_path):
+    d, st, m = run(tmp_path, "merge")
+    assert st["status"] == "success"
+    on = m["accuracy"]["online"]
+    assert on["trajectory"]["coordinate_sessions"] == "per_frame" and "session_note" not in on
+    assert [(s["session"]["session_id"], s["session"]["map_ids"], s["session"]["n_poses"])
+            for s in on["sessions"]] == [(0, [0], 150), (1, [0], 149)]
+    assert on["n_poses_ambiguous_frame"] == 1
+    assert on["ate"]["translation_m"]["rmse"] < 1e-5
+    assert on["rpe"][0]["n_pairs"] == 149 + 148
+    diag = (d / "frame_diagnostics.csv").read_text().splitlines()
+    assert diag[0].endswith(",coordinate_session") and diag[151].endswith(",-1")
+    # Splitting by map id alone (one id here) would mix both frames.
+    from slambench.evaluation.metrics import FrameDiagnostics
+    from slambench.trajectory import read_tum
+    by_map = evaluate_sessions(read_tum(d / "trajectory_online.tum"), FakeDataset(tmp_path, "s1").gt,
+                               {"association_max_dt_s": 0.005}, "map_id",
+                               FrameDiagnostics.read(d / "frame_diagnostics.csv"))
+    assert by_map["n_sessions"] == 1 and by_map["ate"]["translation_m"]["rmse"] > 1.0

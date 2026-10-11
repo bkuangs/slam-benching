@@ -68,13 +68,14 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   seconds with 9 decimals from the original integer-ns stamps; `T_world_sensor` of
   `estimate_frame`; metres; only poses the estimator produced (no interpolation).
 * `frame_diagnostics.csv`: `timestamp_ns, tracking_state, tracking_ok, map_id, track_time_s,
-  in_final_trajectory`. Empty fields mean *unavailable*, never zero. If an estimator exposes no
+  in_final_trajectory, coordinate_session`. Empty fields mean *unavailable*, never zero. If an estimator exposes no
   tracking state, do not write the file: the evaluator then reports an explicitly labelled
   output-availability **proxy** instead of coverage.
 * `AlgorithmOutput.trajectories`: one `TrajectoryOutput` per normalized trajectory with `kind`
   (`online` = pose emitted right after each frame; `final` = exported after shutdown), `path`,
-  `frame` (logical sensor frame; online and final may differ), `coordinate_sessions` (`single`, or
-  `map_id` when each pose is in the frame of the map active at that time) and `keyframe_only`.
+  `frame` (logical sensor frame; online and final may differ), `coordinate_sessions` (`single`;
+  `per_frame` when each pose is in the world frame given per frame by the diagnostics column
+  `coordinate_session`, -1 = ambiguous; `map_id` to use map ids) and `keyframe_only`.
   The legacy `trajectory`/`estimate_frame` fields are read as the final trajectory.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 

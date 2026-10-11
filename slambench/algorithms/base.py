@@ -26,6 +26,7 @@ FRAME_DIAGNOSTICS_COLUMNS = [
     "map_id",              # estimator map/session id ('' if unavailable)
     "track_time_s",        # per-frame processing time of the tracking call ('' if unavailable)
     "in_final_trajectory", # 1 if a pose for this frame is in the normalized trajectory
+    "coordinate_session",  # id of the world frame the online pose is in; -1 ambiguous; '' unknown
 ]
 
 
@@ -55,8 +56,10 @@ class TrajectoryOutput:
         Logical sensor frame of the poses ("cam0", "imu"); each trajectory may differ.
     coordinate_sessions
         ``single``: all poses share one world frame.
-        ``map_id``: each pose is expressed in the frame of the estimator map that was active when
-        it was emitted (frame_diagnostics map_id); maps are evaluated as independent sessions.
+        ``per_frame``: each pose is in the world frame reported per frame in frame_diagnostics
+        ``coordinate_session`` (falls back to ``map_id`` when unavailable); sessions are aligned
+        and scored independently, ambiguous frames (-1) are excluded.
+        ``map_id``: sessions are the estimator map ids.
     """
     kind: str
     path: Path
@@ -68,8 +71,8 @@ class TrajectoryOutput:
     def __post_init__(self):
         if self.kind not in TRAJECTORY_KINDS:
             raise ValueError(f"trajectory kind must be one of {TRAJECTORY_KINDS}, not {self.kind!r}")
-        if self.coordinate_sessions not in ("single", "map_id"):
-            raise ValueError("coordinate_sessions must be 'single' or 'map_id'")
+        if self.coordinate_sessions not in ("single", "per_frame", "map_id"):
+            raise ValueError("coordinate_sessions must be 'single', 'per_frame' or 'map_id'")
 
     def to_dict(self) -> Dict[str, Any]:
         return {"kind": self.kind, "path": str(self.path), "frame": self.frame,

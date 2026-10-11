@@ -49,11 +49,14 @@ DRIVER_SOURCE_DIR = Path(__file__).resolve().parents[2] / "third_party" / "orbsl
 
 
 def driver_source_sha1() -> Optional[str]:
-    """sha1 of the driver sources in this repository (same as the image's driver_source_sha1)."""
+    """sha1 of the driver sources and ORB-SLAM3 patches in this repository; must equal the image's
+    driver_source_sha1 (orbslam3.def concatenates the same files in the same order)."""
     h = hashlib.sha1()
     try:
-        for name in DRIVER_SOURCES:
-            h.update((DRIVER_SOURCE_DIR / name).read_bytes())
+        files = [DRIVER_SOURCE_DIR / n for n in DRIVER_SOURCES]
+        files += sorted((DRIVER_SOURCE_DIR / "patches").glob("*.patch"), key=lambda p: p.name)
+        for f in files:
+            h.update(f.read_bytes())
     except OSError:
         return None
     return h.hexdigest()
@@ -292,6 +295,8 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 try:
                     row = {"frame_idx": int(r["frame_idx"]), "timestamp_ns": int(r["timestamp_ns"]),
                            "state": int(r["state"]),
+                           "coord_session": (int(r["coord_session"]) if r.get("coord_session") not in (None, "")
+                                             else None),
                            "map_id": int(r["map_id"]) if r.get("map_id") not in (None, "") else -1,
                            "track_time_s": (float(r["track_time_s"]) if r.get("track_time_s") not in (None, "")
                                             else float("nan"))}
@@ -354,7 +359,7 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             trajectories.append(TrajectoryOutput(
                 "online", online_path, "cam0",
                 "pose available right after each frame was tracked (may include loop closures that "
-                "had already happened, never later ones)", coordinate_sessions="map_id"))
+                "had already happened, never later ones)", coordinate_sessions="per_frame"))
 
         # Final trajectory -> normalized TUM, with timestamps snapped to the exact input stamps.
         traj_path, final_ts, final_problem = None, set(), None
@@ -391,8 +396,10 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                     st = r["state"]
                     tt = "" if np.isnan(r["track_time_s"]) else r["track_time_s"]
                     w.writerow([r["timestamp_ns"], TRACKING_STATES.get(st, str(st)), int(st in OK_STATES),
-                                r["map_id"] if r["map_id"] >= 0 else "", tt, int(r["timestamp_ns"] in final_ts)])
+                                r["map_id"] if r["map_id"] >= 0 else "", tt, int(r["timestamp_ns"] in final_ts),
+                                "" if r["coord_session"] is None else r["coord_session"]])
         avail = {"tracking_state": bool(log_rows), "map_id": bool(log_rows),
+                 "coordinate_session": any(r["coord_session"] is not None for r in log_rows),
                  "per_frame_time": bool(log_rows), "online_pose": bool(online)}
         extra.update({"n_frames_input": int(len(frames_ts)), "n_frames_logged": len(log_rows),
                       "n_frames_tracking_ok": n_ok, "n_final_poses": len(final_ts)})

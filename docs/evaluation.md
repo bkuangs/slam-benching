@@ -26,13 +26,21 @@ separately in its own sensor frame (`accuracy.online`, `accuracy.final`):
   closures that happened *before* that frame, never later ones, so it is not pure odometry.
   `final` = `SaveTrajectoryEuRoC` after shutdown (`imu` frame in inertial modes, largest map only).
   The two therefore use different GT-body→sensor transforms.
-* **Map sessions.** Online poses are expressed in the map that was active when they were emitted
-  (`coordinate_sessions: map_id`). Maps have independent world frames, so each map is a session that
-  is associated, aligned and scored on its own. Nothing is concatenated under one alignment, and RPE
-  never pairs samples from different maps. `accuracy.<kind>.sessions[]` lists each session (map id,
-  poses, span, fraction of the input duration, its own alignment and metrics). The top-level ATE/RPE
-  pool the per-sample/per-pair errors of sessions with at least `session_min_matched` matches.
-  `final` uses one session (`coordinate_sessions: single`).
+* **Coordinate sessions.** An online pose is expressed in the world frame of the map active when
+  it was emitted, and that frame can change: a new map after tracking loss, a **map merge** (in
+  ORB-SLAM3 the merged map takes over the old map *id*, so ids alone miss it), or an in-place
+  re-expression (IMU initialisation / inertial merge rescale and rotate the map). The driver
+  therefore logs a per-frame `coord_session` (frame_diagnostics `coordinate_session`) that changes
+  whenever the active Map object, its id, its origin keyframe or that keyframe's pose changes; loop
+  closure and bundle adjustment keep the origin keyframe fixed, so they do not start a session. The
+  map frame is read before and after each tracking call; if it changed in between, the frame is
+  marked `-1` (ambiguous) and excluded (`n_poses_ambiguous_frame`).
+  Each session is associated, aligned and scored on its own; nothing is concatenated under one
+  alignment, and RPE never pairs samples from different sessions. `accuracy.<kind>.sessions[]` lists
+  each session (session id, map ids, poses, span, fraction of the input duration, its own alignment
+  and metrics). The top-level ATE/RPE pool the per-sample/per-pair errors of sessions with at least
+  `session_min_matched` matches. Runs from before `coord_session` existed fall back to map ids with a
+  `session_note`. `final` uses one session (`coordinate_sessions: single`).
 * **Failed runs.** Evaluation also runs for crashed or timed-out runs: the online prefix written
   before a crash is scored while the run keeps its failed status (`final` is then unavailable).
 * **Label.** All accuracy numbers are *aligned benchmark accuracy*: the alignment is fitted over

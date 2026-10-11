@@ -53,8 +53,10 @@ def _trajectory_plot(plt, path: Path, kind: str, acc: Dict[str, Any], gt_all: Op
             color = SESSION_COLORS[k % len(SESSION_COLORS)] if multi else COLORS[kind]
             lab = None
             if k not in labelled:
-                mid = per_session[k]["map_id"] if k < len(per_session) else k
-                lab = f"{kind} estimate, map {mid}" if multi else f"{kind} estimate ({acc['alignment']['label']})"
+                ps = per_session[k] if k < len(per_session) else {"session_id": k, "map_ids": None}
+                maps = f" (map {', '.join(map(str, ps['map_ids']))})" if ps.get("map_ids") else ""
+                lab = (f"{kind} estimate, session {ps['session_id']}{maps}" if multi
+                       else f"{kind} estimate ({acc['alignment']['label']})")
                 labelled.add(k)
             ax.plot(est[m, a], est[m, b], "-", color=color, lw=1, label=lab)
         ax.set_xlabel(f"{names[0]} [m]")
@@ -64,7 +66,7 @@ def _trajectory_plot(plt, path: Path, kind: str, acc: Dict[str, Any], gt_all: Op
     axes[0].legend(loc="best", fontsize=8)
     ate = acc["ate"]["translation_m"]
     fig.suptitle(f"{title}\n{kind} trajectory: ATE RMSE {ate['rmse']:.3f} m over {ate['n']} matched samples "
-                 f"({acc.get('n_sessions_pooled', 1)} map session(s), each aligned separately; "
+                 f"({acc.get('n_sessions_pooled', 1)} coordinate session(s), each aligned separately; "
                  "gaps not interpolated)")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
