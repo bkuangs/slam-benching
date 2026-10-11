@@ -72,6 +72,19 @@ def _cmd_evaluate(args) -> int:
     return 0
 
 
+def _cmd_view(args) -> int:
+    try:
+        from .viz.rerun_export import export_run
+    except ImportError as exc:  # pragma: no cover
+        print(f"viewer needs the rerun SDK: pip install -e '.[viz]' ({exc})")
+        return 2
+    rep = export_run(Path(args.run_dir), Path(args.output) if args.output else None, stride=args.stride,
+                     jpeg_quality=args.jpeg_quality, max_width=args.max_width, images=not args.no_images)
+    print(json.dumps(rep, indent=2, default=str))
+    print(f"open locally with: pip install rerun-sdk=={rep['rerun_version']} && rerun {Path(rep['out']).name}")
+    return 0
+
+
 def _cmd_summarize(args) -> int:
     from .evaluation.summary import find_runs, write_summary
     runs = find_runs(Path(args.root))
@@ -139,6 +152,13 @@ def main(argv=None) -> int:
     p = add("evaluate", _cmd_evaluate, "(re-)evaluate a run directory")
     p.add_argument("run_dir")
     p.add_argument("--set", action="append", help="e.g. evaluation.alignment=sim3")
+    p = add("view", _cmd_view, "export a run directory to a Rerun replay file (.rrd)")
+    p.add_argument("run_dir")
+    p.add_argument("-o", "--output", help="default: <run_dir>/replay.rrd")
+    p.add_argument("--stride", type=int, default=2, help="log every N-th image (poses/diagnostics: all frames)")
+    p.add_argument("--jpeg-quality", type=int, default=75)
+    p.add_argument("--max-width", type=int, default=640, help="downscale wider images (0 = keep)")
+    p.add_argument("--no-images", action="store_true")
     p = add("summarize", _cmd_summarize, "aggregate all runs under a directory into a CSV")
     p.add_argument("root")
     p.add_argument("-o", "--output")

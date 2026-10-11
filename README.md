@@ -19,6 +19,7 @@ slambench/
               lunapolaris.py          ROS 2 bag adapter (rosbags, no ROS install needed)
               tumvi.py                TUM-VI (EuRoC/ASL export) adapter, used for installation checks
               subtmrs.py              SubT-MRS folder release (SmokeRoom; MEI -> virtual pinhole, mono only)
+  viz/        rerun_export.py         run directory -> Rerun replay (.rrd)
   algorithms/ base.py                 AlgorithmAdapter interface + normalized diagnostics columns
               orbslam3.py             ORB-SLAM3 via Apptainer image
   runner.py, config.py, cli.py        experiment execution, YAML configs, CLI
@@ -69,7 +70,26 @@ sbatch scripts/slurm_slambench.sbatch batch configs/batch_example.yaml   # sever
 sbatch scripts/slurm_slambench.sbatch batch configs/rejection_examples.yaml  # incompatible configs -> config_rejected
 slambench evaluate <run_dir> --set evaluation.alignment=sim3      # re-evaluate with other settings
 slambench summarize ~/scratch/slam-bench-work/runs -o summary.csv # aggregate all runs (failed ones too)
+slambench view <run_dir>                                          # replay file <run_dir>/replay.rrd
 ```
+
+### Replay viewer
+`pip install -e '.[viz]'`, then `slambench view <run_dir> [--stride 2] [--no-images]` writes
+`<run_dir>/replay.rrd` (SmokeRoom, stride 2: ~110 MB, ~1.5 min). Copy it to a machine with a display
+and open it with the **same** Rerun version: `pip install rerun-sdk==0.26.2 && rerun replay.rrd`.
+Play, pause and scrub on the `time` (seconds since the first frame) or `frame` timeline:
+* camera images (every `stride`-th frame, JPEG preview of the prepared estimator input);
+* 3D: ground truth (grey), final trajectory (red), one colour per online coordinate session, each
+  with a labelled start marker; paths break at tracking gaps and session boundaries, and moving
+  markers show the current pose (cleared while there is none);
+* position error per online session and for the final trajectory, tracking OK / coordinate session /
+  map id, tracking time vs frame period, and a log of tracking-state and session changes;
+* a run panel with status and per-session accuracy.
+
+Positions are aligned exactly as the evaluator scores them (each session on its own, using the whole
+session's ground truth): aligned benchmark accuracy, not what the vehicle knew at that instant. If
+ground truth or the dataset is unavailable, raw poses are drawn per session and labelled unaligned.
+Feature/match overlays and map points are not shown (the driver does not log them yet).
 Any config value can be overridden: `--set algorithm.settings.loop_closure=false`.
 
 ### Experiment config
