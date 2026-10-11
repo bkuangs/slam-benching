@@ -6,6 +6,7 @@ experiments:
   - tumvi_room1_orbslam3_stereo.yaml
   - lunapolaris_seq01_orbslam3_stereo.yaml
   - lunapolaris_seq01_orbslam3_stereo_inertial.yaml   # expected: config_rejected (no IMU noise model)
+  - subtmrs_smokeroom_orbslam3_mono.yaml
   - name: lunapolaris_seq01_orbslam3_lidar_rejected     # expected: config_rejected (unsupported mode)
     dataset: {name: lunapolaris, root: ~/scratch/LunaPolaris, sequence: sequence_01}
     algorithm: {name: orbslam3, mode: lidar_inertial}

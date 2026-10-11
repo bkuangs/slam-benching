@@ -80,13 +80,13 @@ class CameraIntrinsics:
 @dataclass
 class StereoCalibration:
     left: CameraIntrinsics
-    right: CameraIntrinsics
+    right: Optional[CameraIntrinsics]   # None for single-camera datasets (mono modes only)
     T_left_right: np.ndarray        # 4x4, pose of right camera in left camera frame (p_left = T * p_right)
     baseline_m: float
     source: str                     # provenance string
 
     def to_dict(self) -> dict:
-        return {"left": asdict(self.left), "right": asdict(self.right),
+        return {"left": asdict(self.left), "right": asdict(self.right) if self.right else None,
                 "T_left_right": np.asarray(self.T_left_right).tolist(),
                 "baseline_m": self.baseline_m, "source": self.source}
 

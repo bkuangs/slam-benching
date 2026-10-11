@@ -11,3 +11,7 @@ experiments:
   - name: tumvi_room1_orbslam3_lidar                    # dataset has no LiDAR stream
     dataset: {name: tumvi, root: ~/scratch/datasets/tumvi, sequence: dataset-room1_512_16}
     algorithm: {name: orbslam3, mode: lidar}
+  - subtmrs_smokeroom_orbslam3_mono_inertial.yaml     # no verified IMU noise model in SubT-MRS
+  - name: subtmrs_smokeroom_orbslam3_stereo             # single RGB camera, no stereo pair
+    dataset: {name: subtmrs, root: ~/scratch/datasets/subtmrs, sequence: SubT_MRS_Hawkins_Smoke_Handheld}
+    algorithm: {name: orbslam3, mode: stereo}

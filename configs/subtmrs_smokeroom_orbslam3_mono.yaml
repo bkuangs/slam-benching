@@ -1,0 +1,37 @@
+# ORB-SLAM3 monocular on SubT-MRS SmokeRoom (ICCV'23 SLAM Challenge bonus sequence).
+# Data: see docs/datasets/subtmrs.md (scripts/download_subtmrs_smokeroom.sbatch).
+name: subtmrs_smokeroom_orbslam3_mono
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: subtmrs
+  root: ~/scratch/datasets/subtmrs          # contains SubT_MRS_Hawkins_Smoke_Handheld/
+  sequence: SubT_MRS_Hawkins_Smoke_Handheld
+  options:
+    # MEI (omnidirectional) images are resampled into this virtual pinhole camera.
+    pinhole_width: 640
+    pinhole_height: 480
+    pinhole_focal: null                    # null -> mean(gamma1, gamma2)/(1+xi) ~= 277.8 px (98x82 deg FOV)
+
+algorithm:
+  name: orbslam3
+  mode: mono
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif
+  settings:
+    orb_n_features: 1200
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: sim3                # monocular: scale-ambiguous
+  association_max_dt_s: 0.005    # reference trajectory at 200 Hz
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

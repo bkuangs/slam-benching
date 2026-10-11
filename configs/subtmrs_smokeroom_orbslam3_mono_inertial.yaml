@@ -1,0 +1,36 @@
+# Mono-inertial on SubT-MRS SmokeRoom. Deliberately REJECTED until verified IMU noise parameters
+# exist: SubT-MRS publishes no IMU noise densities / bias random walks for the Epson M-G365.
+# To enable, add e.g.
+#   dataset.options.imu_noise: {gyro_noise_density: ..., accel_noise_density: ...,
+#                               gyro_random_walk: ..., accel_random_walk: ...,
+#                               source: "<where these come from>", verified: true}
+name: subtmrs_smokeroom_orbslam3_mono_inertial
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: subtmrs
+  root: ~/scratch/datasets/subtmrs
+  sequence: SubT_MRS_Hawkins_Smoke_Handheld
+  options:
+    time_offset_s: 0.0           # hardware synchronised (<= 3 ms per dataset hardware notes)
+
+algorithm:
+  name: orbslam3
+  mode: mono_inertial
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif
+  settings:
+    orb_n_features: 1200
+    loop_closure: true
+    playback_rate: 1.0
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3                 # metric (inertial)
+  association_max_dt_s: 0.005
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

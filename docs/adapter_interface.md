@@ -23,7 +23,7 @@ Constructor: `(root: Path, sequence: str, options: dict)`; `options` comes from 
 | method | contract |
 |---|---|
 | `sequence_info() -> SequenceInfo` | streams actually present (logical name → `StreamInfo`), duration, GT availability. |
-| `stereo_calibration() -> StereoCalibration \| None` | calibration that matches the images handed to the estimator (`rectified` flag, model, `T_left_right`, baseline, provenance string). |
+| `stereo_calibration() -> StereoCalibration \| None` | calibration that matches the images handed to the estimator (`rectified` flag, model, `T_left_right`, baseline, provenance string). Single-camera datasets set `right=None` (mono modes only). |
 | `imu_calibration() -> ImuCalibration \| None` | `T_cam0_imu`, rate, `ImuNoise` (with `source` and `verified`), time offset (`None` = unknown). |
 | `ground_truth() -> GroundTruth \| None` | poses of `body_frame` in `reference_frame`, integer-ns stamps, `quaternions_xyzw=None` for position-only GT. Never written into estimator inputs. |
 | `T_gt_body_sensor(frame) -> 4x4 \| None` | pose of logical sensor frame (`cam0`, `imu`) in the GT body frame; `None` if unknown (accuracy is then reported as unavailable). |

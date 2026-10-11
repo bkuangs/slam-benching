@@ -18,6 +18,7 @@ slambench/
   datasets/   base.py                 DatasetAdapter interface + offline format writers
               lunapolaris.py          ROS 2 bag adapter (rosbags, no ROS install needed)
               tumvi.py                TUM-VI (EuRoC/ASL export) adapter, used for installation checks
+              subtmrs.py              SubT-MRS folder release (SmokeRoom; MEI -> virtual pinhole, mono only)
   algorithms/ base.py                 AlgorithmAdapter interface + normalized diagnostics columns
               orbslam3.py             ORB-SLAM3 via Apptainer image
   runner.py, config.py, cli.py        experiment execution, YAML configs, CLI
@@ -25,6 +26,7 @@ slambench/
 third_party/orbslam3/                 pinned container definition, headless driver, patch
 configs/                              example experiment and batch configs
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
+scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calibration + GT
 docs/                                 adapter interface, evaluation methodology, dataset notes
 tests/                                evaluator / runner tests with synthetic ground truth
 ```
@@ -51,6 +53,9 @@ sbatch -p ice-cpu -c 8 --mem=32G -t 02:00:00 third_party/orbslam3/build_containe
 #    TUM-VI room1 (installation check, 1.7 GB):
 #      https://cdn3.vision.in.tum.de/tumvi/exported/euroc/512_16/dataset-room1_512_16.tar
 #      -> ~/scratch/datasets/tumvi/dataset-room1_512_16/
+#    SubT-MRS SmokeRoom (ICCV'23 SLAM Challenge, 8.6 GB; mono / mono_inertial only):
+#      sbatch scripts/download_subtmrs_smokeroom.sbatch
+#      -> ~/scratch/datasets/subtmrs/SubT_MRS_Hawkins_Smoke_Handheld/  (see docs/datasets/subtmrs.md)
 ```
 
 Large downloads were killed on PACE login nodes; run them as Slurm jobs.
@@ -101,9 +106,10 @@ reported separately in `eval_status`.
   normalized outputs, how to add a dataset or estimator.
 * `docs/evaluation.md` — association, frames, alignment, ATE/RPE, coverage, timing.
 * `docs/datasets/lunapolaris.md` — verified LunaPolaris topics, timestamps, calibration, frames.
+* `docs/datasets/subtmrs.md` — SubT-MRS SmokeRoom layout, MEI→pinhole conversion, extrinsics, GT.
 * `docs/results/milestone1.md` — what ran, what was verified, blockers.
 
 ## Licences
 LunaPolaris: CC BY 4.0, © 2025 University of Luxembourg — Database by Dave van der Meer,
 SnT – SpaceR. ORB-SLAM3: GPLv3 (built inside the container, not redistributed here).
-TUM-VI: CC BY 4.0.
+TUM-VI: CC BY 4.0. SubT-MRS: CC BY 4.0 (AirLab, CMU).

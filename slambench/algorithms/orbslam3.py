@@ -105,6 +105,8 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             return problems + [f"cannot read camera calibration: {exc}"]
         if calib is None:
             return problems + ["dataset provides no camera calibration"]
+        if stereo and calib.right is None:
+            return problems + ["dataset provides a single camera only; stereo modes need two"]
         for cam in ([calib.left, calib.right] if stereo else [calib.left]):
             if cam.model not in ("pinhole", "kannala_brandt"):
                 problems.append(f"camera model {cam.model} not supported by ORB-SLAM3 adapter")
