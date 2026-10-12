@@ -28,6 +28,7 @@ third_party/orbslam3/                 pinned container definition, headless driv
 configs/                              example experiment and batch configs
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
 scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calibration + GT
+scripts/compare_variants.py           repeated runs of config variants: outages, map continuity, shared-timestamp error
 docs/                                 adapter interface, evaluation methodology, dataset notes
 tests/                                evaluator / runner tests with synthetic ground truth
 ```
