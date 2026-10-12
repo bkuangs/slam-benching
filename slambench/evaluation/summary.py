@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Union
 
 HEAD_COLUMNS = [
-    "run_id", "status", "stage", "error_stage", "message", "estimator_outcome", "eval_status",
-    "dataset", "sequence", "algorithm", "mode", "loop_closure", "playback_rate", "association_max_dt_s",
+    "run_id", "experiment", "status", "stage", "error_stage", "message", "estimator_outcome", "eval_status",
+    "dataset", "sequence", "algorithm", "mode", "loop_closure", "clahe", "playback_rate", "association_max_dt_s",
 ]
 KINDS = ("online", "final")
 KIND_COLUMNS = [
@@ -81,6 +81,22 @@ def _kind_columns(kind: str, acc: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def _blank_none(v: Any) -> Any:
+    return "" if v is None else v
+
+
+def _resolved_setting(run_dir: Path, key: str) -> Any:
+    p = run_dir / "config.resolved.yaml"
+    if not p.exists():
+        return None
+    try:
+        import yaml
+        cfg = yaml.safe_load(p.read_text()) or {}
+    except Exception:  # noqa: BLE001 - unreadable config: leave the column empty
+        return None
+    return ((cfg.get("algorithm") or {}).get("settings") or {}).get(key)
+
+
 def run_row(run_dir: Path) -> Dict[str, Any]:
     run_dir = Path(run_dir)
     st = json.loads((run_dir / "status.json").read_text()) if (run_dir / "status.json").exists() else {}
@@ -88,18 +104,23 @@ def run_row(run_dir: Path) -> Dict[str, Any]:
     if (run_dir / "eval" / "metrics.json").exists():
         m = json.loads((run_dir / "eval" / "metrics.json").read_text())
     cfg = st.get("config_summary", {})
+    if "clahe" not in cfg:  # runs recorded before the clahe column existed
+        cfg = {**cfg, "clahe": _resolved_setting(run_dir, "clahe")}
     acc, cov, tim = m.get("accuracy", {}), m.get("coverage", {}), m.get("timing", {})
     if "ate" in acc or "available" in acc:  # metrics.json written before online/final evaluation
         acc = {"final": acc}
     first = next((a for a in acc.values() if isinstance(a, dict) and "association" in a), {})
     row = {
-        "run_id": st.get("run_id", run_dir.name), "status": st.get("status", "unknown"),
+        "run_id": st.get("run_id", run_dir.name),
+        "experiment": cfg.get("experiment", run_dir.parent.name),  # run dirs are <output_root>/<experiment>/<run_id>
+        "status": st.get("status", "unknown"),
         "stage": st.get("stage", ""), "error_stage": _get(st, "error", "stage"),
         "message": st.get("message", ""), "estimator_outcome": st.get("estimator_outcome", ""),
         "eval_status": st.get("eval_status", ""),
         "dataset": cfg.get("dataset", ""), "sequence": cfg.get("sequence", ""),
         "algorithm": cfg.get("algorithm", ""), "mode": cfg.get("mode", ""),
-        "loop_closure": cfg.get("loop_closure", ""), "playback_rate": cfg.get("playback_rate", ""),
+        "loop_closure": cfg.get("loop_closure", ""), "clahe": _blank_none(cfg.get("clahe")),
+        "playback_rate": cfg.get("playback_rate", ""),
         "association_max_dt_s": _get(first, "association", "max_dt_s"),
         "coverage_source": _get(cov, "source"),
         "frame_coverage": _get(cov, "frame_coverage"), "time_coverage": _get(cov, "time_coverage"),

@@ -91,4 +91,6 @@ yet, so recording an offset would misdescribe the inputs actually used.
 
 ## Configs
 * `configs/subtmrs_smokeroom_orbslam3_mono.yaml`: ORB-SLAM3 mono, Sim(3) alignment.
+* `configs/subtmrs_smokeroom_orbslam3_mono_clahe.yaml`: the same with `clahe: true` (grayscale +
+  CLAHE(3.0, 8x8) in the estimator image), for comparing contrast enhancement under smoke.
 * `configs/subtmrs_smokeroom_orbslam3_mono_inertial.yaml`: rejected until IMU noise is verified.

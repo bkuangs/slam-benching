@@ -222,7 +222,7 @@ def run_experiment(cfg: Dict[str, Any], evaluate: bool = True, log=print) -> Pat
     status: Dict[str, Any] = {
         "run_id": run_id, "status": "running", "stage": None, "message": "",
         "harness_started": dt.datetime.now().isoformat(timespec="seconds"),
-        "config_summary": {"dataset": d.get("name"), "sequence": d.get("sequence"),
+        "config_summary": {"experiment": _safe_name(cfg), "dataset": d.get("name"), "sequence": d.get("sequence"),
                            "algorithm": a.get("name"), "mode": a.get("mode"), "source": cfg.get("_source")}}
 
     def stage(name: str) -> None:
@@ -265,7 +265,7 @@ def _run_stages(cfg, evaluate, log, run_dir, status, stage, finish) -> Path:
         _dump_config(run_dir, cfg)
         return finish(RunStatus.CONFIG_REJECTED, f"invalid configuration: {type(exc).__name__}: {exc}", exc=exc)
     s = cfg["algorithm"]["settings"]
-    status["config_summary"].update({"loop_closure": s.get("loop_closure"),
+    status["config_summary"].update({"loop_closure": s.get("loop_closure"), "clahe": s.get("clahe"),
                                      "playback_rate": s.get("playback_rate")})
     _dump_config(run_dir, cfg)
 

@@ -51,7 +51,8 @@ def run_batch(cfgs, evaluate: bool = True, log=print):
             d = run_experiment(cfg, evaluate=evaluate, log=log)
         except Exception as exc:  # noqa: BLE001 - e.g. run directory cannot be created
             log(f"[slambench] experiment could not start: {exc}")
-            entries.append({"run_id": "", "status": "harness_error", "stage": "create_run_dir",
+            entries.append({"run_id": "", "experiment": _safe_name(cfg), "status": "harness_error",
+                            "stage": "create_run_dir",
                             "message": f"run directory could not be created: {type(exc).__name__}: {exc}",
                             "config_source": cfg.get("_source", "")})
             failed += 1

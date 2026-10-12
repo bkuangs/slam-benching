@@ -105,6 +105,33 @@ def test_crash_is_reported_and_batch_summary_lists_failures(tmp_path):
     assert rows[1]["final_ate_trans_rmse_m"] == ""
 
 
+def test_summary_distinguishes_preprocessing_variants(tmp_path):
+    plain = runner.run_experiment(_cfg(tmp_path, name="plain"), log=lambda *_: None)
+    clahe = runner.run_experiment(_cfg(tmp_path, name="with_clahe", algorithm={"settings": {"clahe": True}}),
+                                  log=lambda *_: None)
+    rows = list(csv.DictReader(open(write_summary([plain, clahe], tmp_path / "s.csv"))))
+    assert [(r["experiment"], r["clahe"]) for r in rows] == [("plain", ""), ("with_clahe", "True")]
+
+    # runs recorded before these columns existed: fall back to the run dir and resolved config
+    st = json.loads((clahe / "status.json").read_text())
+    for k in ("experiment", "clahe"):
+        del st["config_summary"][k]
+    (clahe / "status.json").write_text(json.dumps(st))
+    row = list(csv.DictReader(open(write_summary([clahe], tmp_path / "s2.csv"))))[0]
+    assert (row["experiment"], row["clahe"]) == ("with_clahe", "True")
+
+
+def test_shipped_clahe_config_differs_only_in_clahe():
+    from pathlib import Path
+    cfgs = Path(__file__).resolve().parents[1] / "configs"
+    base = yaml.safe_load((cfgs / "subtmrs_smokeroom_orbslam3_mono.yaml").read_text())
+    var = yaml.safe_load((cfgs / "subtmrs_smokeroom_orbslam3_mono_clahe.yaml").read_text())
+    assert base["algorithm"]["settings"]["clahe"] is False and var["algorithm"]["settings"]["clahe"] is True
+    for c in (base, var):
+        del c["name"], c["algorithm"]["settings"]["clahe"]
+    assert base == var
+
+
 def test_timeout_is_reported(tmp_path, monkeypatch):
     import sys
     monkeypatch.setattr(FakeAlgorithm, "command",
