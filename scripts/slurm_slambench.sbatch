@@ -3,6 +3,7 @@
 #   sbatch scripts/slurm_slambench.sbatch run configs/lunapolaris_seq01_orbslam3_stereo.yaml
 #   sbatch scripts/slurm_slambench.sbatch batch configs/batch_example.yaml
 # Resources can be overridden on the sbatch command line (-c, --mem, -t, -p).
+# Pin the CPU type the ORB-SLAM3 image was built on (-march=native), e.g. --constraint=gold6226.
 # The submitting shell's environment (PATH incl. apptainer) is inherited by default.
 #SBATCH --job-name=slambench
 #SBATCH --partition=ice-cpu
