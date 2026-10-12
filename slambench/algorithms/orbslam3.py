@@ -11,6 +11,9 @@ slambench offline format and writes:
                         *largest* map (camera frame for visual modes, IMU/body
                         frame for inertial modes). Timestamps in ns (float).
 * keyframes_euroc.txt   System::SaveKeyFrameTrajectoryEuRoC
+* place_recognition.csv every loop/merge check of ORB-SLAM3's place recognition: candidates and
+                        the stage at which each was rejected (patch 0005); frame_log.csv also
+                        records the active map's keyframe / map-point count per frame
 
 ORB-SLAM3 writes RECENTLY_LOST frames into trajectory_euroc.txt (only LOST is
 excluded). The normalized trajectory therefore keeps all saved poses, and the
@@ -71,6 +74,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "loop_closure": True,
     "camera_fps": None,            # None -> rounded median frame rate of the prepared input
     "clahe": False,                # preprocessing; disabled by default
+    "clahe_clip_limit": 3.0,       # CLAHE clip limit (lower = gentler); used only with clahe: true
+    "clahe_tile_grid": 8,          # CLAHE tile grid N x N; used only with clahe: true
     "playback_rate": 1.0,          # 1.0 = real-time throttled input, 0 = as fast as possible
     "imu_insert_kfs_when_lost": None,  # None -> ORB-SLAM3 default
     "log_features": True,          # per-frame keypoints + map-point status (features.bin, ~10 KB/frame)
@@ -108,6 +113,10 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             raise ValueError(f"unknown orbslam3 settings: {sorted(unknown)}")
         out = dict(DEFAULT_SETTINGS)
         out.update(settings)
+        if not float(out["clahe_clip_limit"]) > 0:
+            raise ValueError(f"clahe_clip_limit must be > 0, got {out['clahe_clip_limit']}")
+        if int(out["clahe_tile_grid"]) != out["clahe_tile_grid"] or int(out["clahe_tile_grid"]) < 1:
+            raise ValueError(f"clahe_tile_grid must be an integer >= 1, got {out['clahe_tile_grid']}")
         return out
 
     def validate(self, mode, dataset, settings) -> List[str]:
@@ -275,7 +284,8 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 ctx.mode.value, str(ctx.prepared.directory.resolve()), str(ctx.algo_dir.resolve()),
                 "--playback-rate", str(float(s["playback_rate"]))]
         if s["clahe"]:
-            cmd.append("--clahe")
+            cmd += ["--clahe", "--clahe-clip", repr(float(s["clahe_clip_limit"])),
+                    "--clahe-tile", str(int(s["clahe_tile_grid"]))]
         if s["log_features"]:
             cmd.append("--log-features")
         return cmd
@@ -403,7 +413,8 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                                 "" if r["coord_session"] is None else r["coord_session"]])
         artifacts = {}
         for key, name in (("tracked_features", "features.bin"), ("sparse_map_points", "map_points.csv"),
-                          ("sparse_map_keyframes", "keyframes.csv")):
+                          ("sparse_map_keyframes", "keyframes.csv"),
+                          ("place_recognition", "place_recognition.csv")):
             if (d / name).exists() and (d / name).stat().st_size > 0:
                 artifacts[key] = d / name
         if "sparse_map_points" in artifacts:

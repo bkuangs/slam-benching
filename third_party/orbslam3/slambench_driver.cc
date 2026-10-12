@@ -7,14 +7,16 @@
 //
 // Usage:
 //   orbslam3_driver <vocabulary> <settings.yaml> <mode> <input_dir> <output_dir>
-//                   [--playback-rate R] [--clahe] [--log-features]
+//                   [--playback-rate R] [--clahe] [--clahe-clip C] [--clahe-tile N] [--log-features]
 //
 //   mode: stereo | stereo_inertial | mono | mono_inertial
 //   --playback-rate R : R > 0 throttles input to R x the recorded frame rate
 //                       (1.0 = real time); R = 0 feeds frames as fast as possible.
-//   --clahe           : apply CLAHE(3.0, 8x8) (disabled by default). Colour input (BGR/BGRA as
+//   --clahe           : apply CLAHE (disabled by default). Colour input (BGR/BGRA as
 //                       loaded by cv::imread) is converted to grayscale first; other formats
 //                       are rejected (see slambench_preprocess.h).
+//   --clahe-clip C    : CLAHE clip limit (default 3.0; lower = gentler contrast enhancement).
+//   --clahe-tile N    : CLAHE tile grid N x N (default 8).
 //   --log-features    : write features.bin (keypoints of every frame and their map-point status).
 //
 // Input (input_dir):
@@ -26,6 +28,9 @@
 //                         coord_session numbers the coordinate frame the online pose is expressed
 //                         in (see SameCoordinateFrame); -1 = the frame changed while this frame
 //                         was being tracked, so its pose's frame is ambiguous.
+//                         map_kfs / map_points: size of the active map after the frame.
+//   place_recognition.csv one row per loop/merge check in ORB-SLAM3's loop-closing thread
+//                         (candidates and the stage at which each failed; see patch 0005).
 //   trajectory_euroc.txt  System::SaveTrajectoryEuRoC (largest map, final optimized poses)
 //   keyframes_euroc.txt   System::SaveKeyFrameTrajectoryEuRoC
 //   map_points.csv, keyframes.csv  sparse map of every atlas map at shutdown; rows with
@@ -135,21 +140,30 @@ void WriteStatus(const string &path, const string &status, const string &message
 int main(int argc, char **argv) {
     if (argc < 6) {
         cerr << "Usage: orbslam3_driver <vocabulary> <settings.yaml> <mode> <input_dir> <output_dir>"
-                " [--playback-rate R] [--clahe] [--log-features]" << endl;
+                " [--playback-rate R] [--clahe] [--clahe-clip C] [--clahe-tile N] [--log-features]" << endl;
         return 2;
     }
     const string vocab = argv[1], settings = argv[2], mode = argv[3];
     const string input_dir = argv[4], output_dir = argv[5];
     double playback_rate = 0.0;
     bool use_clahe = false, log_features = false;
+    double clahe_clip = 3.0;
+    int clahe_tile = 8;
     for (int i = 6; i < argc; ++i) {
         string a = argv[i];
         if (a == "--playback-rate" && i + 1 < argc) playback_rate = atof(argv[++i]);
         else if (a == "--clahe") use_clahe = true;
+        else if (a == "--clahe-clip" && i + 1 < argc) clahe_clip = atof(argv[++i]);
+        else if (a == "--clahe-tile" && i + 1 < argc) clahe_tile = atoi(argv[++i]);
         else if (a == "--log-features") log_features = true;
         else { cerr << "Unknown argument: " << a << endl; return 2; }
     }
     const string status_path = output_dir + "/driver_status.json";
+    if (!(clahe_clip > 0.0) || clahe_tile < 1) {
+        cerr << "--clahe-clip must be > 0 and --clahe-tile >= 1" << endl;
+        WriteStatus(status_path, "config_error", "invalid CLAHE parameters", 0, 0);
+        return 2;
+    }
 
     ORB_SLAM3::System::eSensor sensor;
     bool stereo = false, inertial = false;
@@ -176,11 +190,12 @@ int main(int argc, char **argv) {
     }
 
     ORB_SLAM3::System SLAM(vocab, settings, sensor, false);
-    cv::Ptr<cv::CLAHE> clahe = slambench::MakeClahe();
+    cv::Ptr<cv::CLAHE> clahe = slambench::MakeClahe(clahe_clip, clahe_tile);
+    SLAM.SetPlaceRecognitionLog(output_dir + "/place_recognition.csv");
 
     ofstream log(output_dir + "/frame_log.csv");
     log << "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,coord_session,"
-           "tx,ty,tz,qx,qy,qz,qw\n";
+           "map_kfs,map_points,tx,ty,tz,qx,qy,qz,qw\n";
     log << fixed;
 
     ofstream feat;
@@ -250,7 +265,8 @@ int main(int argc, char **argv) {
         last_frame_info = info;
         const long frame_session = SameCoordinateFrame(info_before, info) ? coord_session : -1;
         log << i << "," << fr.t_ns << "," << state << "," << map_id << "," << (map_changed ? 1 : 0)
-            << "," << setprecision(6) << track_s << "," << frame_session;
+            << "," << setprecision(6) << track_s << "," << frame_session
+            << "," << info.n_keyframes << "," << info.n_map_points;
         // Online (not final-optimized) camera pose; only meaningful while tracking is OK.
         if (state == 2 || state == 5) {
             const Sophus::SE3f Twc = Tcw.inverse();

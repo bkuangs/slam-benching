@@ -1,0 +1,270 @@
+diff --git a/include/LoopClosing.h b/include/LoopClosing.h
+index c9ccb26..c46c652 100644
+--- a/include/LoopClosing.h
++++ b/include/LoopClosing.h
+@@ -31,6 +31,7 @@
+ #include <boost/algorithm/string.hpp>
+ #include <thread>
+ #include <mutex>
++#include <fstream>
+ #include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
+ 
+ namespace ORB_SLAM3
+@@ -116,8 +117,18 @@ public:
+ 
+     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+ 
++    // slam-benching patch: per-check place-recognition log (see PRLog in LoopClosing.cc).
++    void SetPlaceRecognitionLog(const std::string &path);
++
+ protected:
+ 
++    // slam-benching patch: place-recognition log
++    std::ofstream* mpPRLog = nullptr;
++    std::mutex mMutexPRLog;
++    std::string mPRKind;
++    void PRLog(const char* event, KeyFrame* pCand = nullptr, int nCand = -1, int bow = -1, int sim3 = -1,
++               int proj = -1, int opt = -1, int projOpt = -1, int cov = -1, int coinc = -1);
++
+     bool CheckNewKeyFrames();
+ 
+ 
+diff --git a/include/System.h b/include/System.h
+index 78eb89a..4d4816d 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -188,7 +188,11 @@ public:
+         long unsigned int origin_kf_id = 0;
+         Eigen::Vector3f t_w_origin = Eigen::Vector3f::Zero();
+         Eigen::Quaternionf q_w_origin = Eigen::Quaternionf::Identity();
++        long unsigned int n_keyframes = 0;  // slam-benching: size of the active map
++        long unsigned int n_map_points = 0;
+     };
++    // slam-benching patch: write one CSV row per place-recognition (loop/merge) check to `path`.
++    void SetPlaceRecognitionLog(const std::string &path);
+     MapFrameInfo GetCurrentMapFrameInfo();
+     // slam-benching patch: inlier/outlier flags of the features of the most recently tracked frame
+     // (Frame::mvbOutlier, same indexing as GetTrackedMapPoints). Call right after Track*().
+diff --git a/src/LoopClosing.cc b/src/LoopClosing.cc
+index 319afb5..c1043c8 100644
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -18,6 +18,7 @@
+ 
+ 
+ #include "LoopClosing.h"
++#include <iomanip>
+ 
+ #include "Sim3Solver.h"
+ #include "Converter.h"
+@@ -321,6 +322,40 @@ bool LoopClosing::CheckNewKeyFrames()
+     return(!mlpLoopKeyFrameQueue.empty());
+ }
+ 
++void LoopClosing::SetPlaceRecognitionLog(const std::string &path)
++{
++    unique_lock<mutex> lock(mMutexPRLog);
++    delete mpPRLog;
++    mpPRLog = new std::ofstream(path);
++    *mpPRLog << "kf_time_s,kf_id,map_id,map_kfs,kind,event,cand_kf_id,cand_map_id,n_candidates,bow_matches,"
++                "sim3_inliers,proj_matches,opt_matches,proj_opt_matches,covisible_consistent,coincidences\n";
++    mpPRLog->flush();
++}
++
++// One row per place-recognition check of the current keyframe. kind: loop | merge | "" (both).
++// Thresholds (DetectCommonRegionsFromBoW): bow_matches >= 20, sim3 RANSAC converged with >= 15
++// inliers, proj_matches >= 50, opt_matches >= 20, proj_opt_matches >= 80, covisible_consistent >= 3
++// for an immediate detection; otherwise 3 consecutive keyframes (coincidences) are needed via
++// refine_* (DetectAndReffineSim3FromLastKF: proj >= 30, opt > 50, proj_opt >= 100).
++void LoopClosing::PRLog(const char* event, KeyFrame* pCand, int nCand, int bow, int sim3, int proj, int opt,
++                        int projOpt, int cov, int coinc)
++{
++    unique_lock<mutex> lock(mMutexPRLog);
++    if(!mpPRLog || !mpCurrentKF)
++        return;
++    Map* pMap = mpCurrentKF->GetMap();
++    *mpPRLog << std::fixed << std::setprecision(6) << mpCurrentKF->mTimeStamp << "," << mpCurrentKF->mnId << ","
++             << (pMap ? (long)pMap->GetId() : -1L) << "," << (pMap ? (long)pMap->KeyFramesInMap() : -1L) << ","
++             << mPRKind << "," << event << ",";
++    if(pCand)
++        *mpPRLog << pCand->mnId << "," << (pCand->GetMap() ? (long)pCand->GetMap()->GetId() : -1L);
++    else
++        *mpPRLog << ",";
++    *mpPRLog << "," << nCand << "," << bow << "," << sim3 << "," << proj << "," << opt << "," << projOpt << ","
++             << cov << "," << coinc << "\n";
++    mpPRLog->flush();
++}
++
+ bool LoopClosing::NewDetectCommonRegions()
+ {
+     // To deactivate placerecognition. No loopclosing nor merging will be performed
+@@ -355,6 +390,8 @@ bool LoopClosing::NewDetectCommonRegions()
+ 
+     if(mpLastMap->GetAllKeyFrames().size() < 12)
+     {
++        mPRKind = "";
++        PRLog("skip_small_map");
+         // cout << "LoopClousure: Stereo KF inserted without check, map is small: " << mpCurrentKF->mnId << endl;
+         mpKeyFrameDB->add(mpCurrentKF);
+         mpCurrentKF->SetErase();
+@@ -381,6 +418,9 @@ bool LoopClosing::NewDetectCommonRegions()
+         int numProjMatches = 0;
+         vector<MapPoint*> vpMatchedMPs;
+         bool bCommonRegion = DetectAndReffineSim3FromLastKF(mpCurrentKF, mpLoopMatchedKF, gScw, numProjMatches, mvpLoopMPs, vpMatchedMPs);
++        mPRKind = "loop";
++        PRLog(bCommonRegion ? "refine_ok" : "refine_fail", mpLoopMatchedKF, -1, -1, -1, numProjMatches, -1, -1, -1,
++              mnLoopNumCoincidences + (bCommonRegion ? 1 : 0));
+         if(bCommonRegion)
+         {
+ 
+@@ -431,6 +471,9 @@ bool LoopClosing::NewDetectCommonRegions()
+         int numProjMatches = 0;
+         vector<MapPoint*> vpMatchedMPs;
+         bool bCommonRegion = DetectAndReffineSim3FromLastKF(mpCurrentKF, mpMergeMatchedKF, gScw, numProjMatches, mvpMergeMPs, vpMatchedMPs);
++        mPRKind = "merge";
++        PRLog(bCommonRegion ? "refine_ok" : "refine_fail", mpMergeMatchedKF, -1, -1, -1, numProjMatches, -1, -1, -1,
++              mnMergeNumCoincidences + (bCommonRegion ? 1 : 0));
+         if(bCommonRegion)
+         {
+             bMergeDetectedInKF = true;
+@@ -470,6 +513,8 @@ bool LoopClosing::NewDetectCommonRegions()
+ 
+     if(mbMergeDetected || mbLoopDetected)
+     {
++        mPRKind = mbMergeDetected ? "merge" : "loop";
++        PRLog("detected", mbMergeDetected ? mpMergeMatchedKF : mpLoopMatchedKF);
+ #ifdef REGISTER_TIMES
+         vdEstSim3_ms.push_back(timeEstSim3);
+ #endif
+@@ -489,6 +534,10 @@ bool LoopClosing::NewDetectCommonRegions()
+         std::chrono::steady_clock::time_point time_StartQuery = std::chrono::steady_clock::now();
+ #endif
+         mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand,3);
++        mPRKind = "loop";
++        PRLog("bow_query", nullptr, (int)vpLoopBowCand.size());
++        mPRKind = "merge";
++        PRLog("bow_query", nullptr, (int)vpMergeBowCand.size());
+ #ifdef REGISTER_TIMES
+         std::chrono::steady_clock::time_point time_EndQuery = std::chrono::steady_clock::now();
+ 
+@@ -504,12 +553,18 @@ bool LoopClosing::NewDetectCommonRegions()
+     //Loop candidates
+     if(!bLoopDetectedInKF && !vpLoopBowCand.empty())
+     {
++        mPRKind = "loop";
+         mbLoopDetected = DetectCommonRegionsFromBoW(vpLoopBowCand, mpLoopMatchedKF, mpLoopLastCurrentKF, mg2oLoopSlw, mnLoopNumCoincidences, mvpLoopMPs, mvpLoopMatchedMPs);
++        if(mbLoopDetected)
++            PRLog("detected", mpLoopMatchedKF, -1, -1, -1, -1, -1, -1, -1, mnLoopNumCoincidences);
+     }
+     // Merge candidates
+     if(!bMergeDetectedInKF && !vpMergeBowCand.empty())
+     {
++        mPRKind = "merge";
+         mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand, mpMergeMatchedKF, mpMergeLastCurrentKF, mg2oMergeSlw, mnMergeNumCoincidences, mvpMergeMPs, mvpMergeMatchedMPs);
++        if(mbMergeDetected)
++            PRLog("detected", mpMergeMatchedKF, -1, -1, -1, -1, -1, -1, -1, mnMergeNumCoincidences);
+     }
+ 
+ #ifdef REGISTER_TIMES
+@@ -609,6 +664,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+     {
+         if(!pKFi || pKFi->isBad())
+             continue;
++        int lgBow = -1, lgSim3 = -1, lgProj = -1, lgOpt = -1, lgProjOpt = -1, lgCov = -1;
+ 
+         // std::cout << "KF candidate: " << pKFi->mnId << std::endl;
+         // Current KF against KF with covisibles version
+@@ -636,6 +692,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+         }
+         if(bAbortByNearKF)
+         {
++            PRLog("cand_near_current", pKFi);
+             //std::cout << "Check BoW aborted because is close to the matched one " << std::endl;
+             continue;
+         }
+@@ -688,6 +745,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+ 
+         //pMostBoWMatchesKF = vpCovKFi[pMostBoWMatchesKF];
+ 
++        lgBow = numBoWMatches;
+         if(numBoWMatches >= nBoWMatches) // TODO pick a good threshold
+         {
+             // Geometric validation
+@@ -709,6 +767,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+                 //Verbose::PrintMess("BoW guess: Solver achieve " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
+             }
+ 
++            lgSim3 = bConverge ? nInliers : 0;
+             if(bConverge)
+             {
+                 //std::cout << "Check BoW: SolverSim3 converged" << std::endl;
+@@ -755,6 +814,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+                 int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpKeyFrames, vpMatchedMP, vpMatchedKF, 8, 1.5);
+                 //cout <<"BoW: " << numProjMatches << " matches between " << vpMapPoints.size() << " points with coarse Sim3" << endl;
+ 
++                lgProj = numProjMatches;
+                 if(numProjMatches >= nProjMatches)
+                 {
+                     // Optimize Sim3 transformation with every matches
+@@ -766,6 +826,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+ 
+                     int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pKFi, vpMatchedMP, gScm, 10, mbFixScale, mHessian7x7, true);
+ 
++                    lgOpt = numOptMatches;
+                     if(numOptMatches >= nSim3Inliers)
+                     {
+                         g2o::Sim3 gSmw(pMostBoWMatchesKF->GetRotation().cast<double>(),pMostBoWMatchesKF->GetTranslation().cast<double>(),1.0);
+@@ -776,6 +837,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+                         vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
+                         int numProjOptMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpMatchedMP, 5, 1.0);
+ 
++                        lgProjOpt = numProjOptMatches;
+                         if(numProjOptMatches >= nProjOptMatches)
+                         {
+                             int max_x = -1, min_x = 1000000;
+@@ -840,6 +902,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+                                 j++;
+                             }
+ 
++                            lgCov = nNumKFs;
+                             if(nNumKFs < 3)
+                             {
+                                 vnStage[index] = 8;
+@@ -864,6 +927,12 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+                 Verbose::PrintMess("BoW candidate: it don't match with the current one", Verbose::VERBOSITY_DEBUG);
+             }*/
+         }
++        {
++            const char* ev = lgCov >= 0 ? "cand_passed" : lgProjOpt >= 0 ? "cand_fail_proj_opt"
++                           : lgOpt >= 0 ? "cand_fail_opt" : lgProj >= 0 ? "cand_fail_proj"
++                           : lgSim3 >= 0 ? "cand_fail_sim3" : "cand_fail_bow";
++            PRLog(ev, pKFi, -1, lgBow, lgSim3, lgProj, lgOpt, lgProjOpt, lgCov);
++        }
+         index++;
+     }
+ 
+diff --git a/src/System.cc b/src/System.cc
+index 7ca7250..a217642 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -1390,6 +1390,11 @@ bool System::SaveSparseMapSlambench(const std::string &dir)
+     return true;
+ }
+ 
++void System::SetPlaceRecognitionLog(const std::string &path)
++{
++    mpLoopCloser->SetPlaceRecognitionLog(path);
++}
++
+ System::MapFrameInfo System::GetCurrentMapFrameInfo()
+ {
+     MapFrameInfo info;
+@@ -1398,6 +1403,8 @@ System::MapFrameInfo System::GetCurrentMapFrameInfo()
+         return info;
+     info.map = pMap;
+     info.map_id = pMap->GetId();
++    info.n_keyframes = pMap->KeyFramesInMap();
++    info.n_map_points = pMap->MapPointsInMap();
+     // mpKFinitial is only assigned once the map has a keyframe (never freed afterwards).
+     if(pMap->KeyFramesInMap() > 0)
+     {

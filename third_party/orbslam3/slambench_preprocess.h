@@ -40,6 +40,8 @@ inline std::string PreprocessForOrb(cv::Mat &im, bool use_clahe, const cv::Ptr<c
     return "";
 }
 
-inline cv::Ptr<cv::CLAHE> MakeClahe() { return cv::createCLAHE(3.0, cv::Size(8, 8)); }
+inline cv::Ptr<cv::CLAHE> MakeClahe(double clip_limit = 3.0, int tile_grid = 8) {
+    return cv::createCLAHE(clip_limit, cv::Size(tile_grid, tile_grid));
+}
 
 }  // namespace slambench

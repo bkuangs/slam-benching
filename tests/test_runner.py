@@ -89,6 +89,12 @@ def test_orbslam3_settings_file_for_rectified_stereo(tmp_path):
     assert "--log-features" in cmd
     ctx.settings["log_features"] = False
     assert "--log-features" not in a.command(ctx)
+    ctx.settings.update(a.resolve_settings({"clahe": True, "clahe_clip_limit": 1.5}))
+    cmd = a.command(ctx)
+    assert cmd[cmd.index("--clahe-clip") + 1] == "1.5" and cmd[cmd.index("--clahe-tile") + 1] == "8"
+    for bad in ({"clahe_clip_limit": 0}, {"clahe_tile_grid": 0}, {"clahe_tile_grid": 2.5}):
+        with pytest.raises(ValueError):
+            a.resolve_settings(bad)
 
 
 def test_crash_is_reported_and_batch_summary_lists_failures(tmp_path):
@@ -107,18 +113,19 @@ def test_crash_is_reported_and_batch_summary_lists_failures(tmp_path):
 
 def test_summary_distinguishes_preprocessing_variants(tmp_path):
     plain = runner.run_experiment(_cfg(tmp_path, name="plain"), log=lambda *_: None)
-    clahe = runner.run_experiment(_cfg(tmp_path, name="with_clahe", algorithm={"settings": {"clahe": True}}),
+    clahe = runner.run_experiment(_cfg(tmp_path, name="with_clahe", algorithm={"settings": {"clahe": True, "clahe_clip_limit": 1.5}}),
                                   log=lambda *_: None)
     rows = list(csv.DictReader(open(write_summary([plain, clahe], tmp_path / "s.csv"))))
     assert [(r["experiment"], r["clahe"]) for r in rows] == [("plain", ""), ("with_clahe", "True")]
+    assert [r["clahe_clip_limit"] for r in rows] == ["", "1.5"]
 
     # runs recorded before these columns existed: fall back to the run dir and resolved config
     st = json.loads((clahe / "status.json").read_text())
-    for k in ("experiment", "clahe"):
+    for k in ("experiment", "clahe", "clahe_clip_limit"):
         del st["config_summary"][k]
     (clahe / "status.json").write_text(json.dumps(st))
     row = list(csv.DictReader(open(write_summary([clahe], tmp_path / "s2.csv"))))[0]
-    assert (row["experiment"], row["clahe"]) == ("with_clahe", "True")
+    assert (row["experiment"], row["clahe"], row["clahe_clip_limit"]) == ("with_clahe", "True", "1.5")
 
 
 def test_shipped_clahe_config_differs_only_in_clahe():

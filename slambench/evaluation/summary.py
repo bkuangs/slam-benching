@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Union
 
 HEAD_COLUMNS = [
     "run_id", "experiment", "status", "stage", "error_stage", "message", "estimator_outcome", "eval_status",
-    "dataset", "sequence", "algorithm", "mode", "loop_closure", "clahe", "playback_rate", "association_max_dt_s",
+    "dataset", "sequence", "algorithm", "mode", "loop_closure", "clahe", "clahe_clip_limit", "playback_rate", "association_max_dt_s",
 ]
 KINDS = ("online", "final")
 KIND_COLUMNS = [
@@ -106,6 +106,9 @@ def run_row(run_dir: Path) -> Dict[str, Any]:
     cfg = st.get("config_summary", {})
     if "clahe" not in cfg:  # runs recorded before the clahe column existed
         cfg = {**cfg, "clahe": _resolved_setting(run_dir, "clahe")}
+    if "clahe_clip_limit" not in cfg:  # before the clip limit was configurable it was fixed at 3.0
+        clip = _resolved_setting(run_dir, "clahe_clip_limit")
+        cfg = {**cfg, "clahe_clip_limit": clip if clip is not None else (3.0 if cfg.get("clahe") else None)}
     acc, cov, tim = m.get("accuracy", {}), m.get("coverage", {}), m.get("timing", {})
     if "ate" in acc or "available" in acc:  # metrics.json written before online/final evaluation
         acc = {"final": acc}
@@ -120,6 +123,7 @@ def run_row(run_dir: Path) -> Dict[str, Any]:
         "dataset": cfg.get("dataset", ""), "sequence": cfg.get("sequence", ""),
         "algorithm": cfg.get("algorithm", ""), "mode": cfg.get("mode", ""),
         "loop_closure": cfg.get("loop_closure", ""), "clahe": _blank_none(cfg.get("clahe")),
+        "clahe_clip_limit": _blank_none(cfg.get("clahe_clip_limit")),
         "playback_rate": cfg.get("playback_rate", ""),
         "association_max_dt_s": _get(first, "association", "max_dt_s"),
         "coverage_source": _get(cov, "source"),

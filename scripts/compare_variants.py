@@ -23,7 +23,7 @@ import glob
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import yaml
@@ -60,6 +60,7 @@ def load_run(rd: Path, ds_cache: Dict[str, Any]) -> Dict[str, Any]:
                            "input_ts": its, "t0": int(its[0]), "diag": diag,
                            "coverage": coverage_from_states(diag, its),
                            "host": f"{env.get('hostname', '?')} ({env.get('cpu_model', '?')})",
+                           "image": ((env.get("algorithm") or {}).get("container_sha256") or "?")[:12],
                            "git": ((env.get("git") or {}).get("commit") or "")[:7]
                            + ("+dirty" if (env.get("git") or {}).get("dirty") else "")}
     for k in KINDS:
@@ -77,11 +78,14 @@ def load_run(rd: Path, ds_cache: Dict[str, Any]) -> Dict[str, Any]:
     return run
 
 
+CLAHE_KEYS = ("clahe", "clahe_clip_limit", "clahe_tile_grid")
+
+
 def settings_fingerprint(run: Dict[str, Any]) -> str:
     c = run["cfg"]
     keep = {"dataset": c["dataset"], "algorithm": {k: c["algorithm"].get(k) for k in ("name", "mode", "settings")},
             "evaluation": c.get("evaluation")}
-    keep["algorithm"]["settings"] = {k: v for k, v in (keep["algorithm"]["settings"] or {}).items() if k != "clahe"}
+    keep["algorithm"]["settings"] = {k: v for k, v in (keep["algorithm"]["settings"] or {}).items() if k not in CLAHE_KEYS}
     return json.dumps(keep, sort_keys=True, default=str)
 
 
@@ -139,6 +143,51 @@ def main_outage(run: Dict[str, Any], window) -> Dict[str, Any]:
     in_final = d.in_final
     post = (rel >= (out.get("recovered_rel_s") or 1e18)) & ok
     out["post_recovery_frames_in_final"] = float(in_final[post].mean()) if post.any() else None
+    return out
+
+
+PR_STAGES = ("cand_fail_bow", "cand_fail_sim3", "cand_fail_proj", "cand_fail_opt", "cand_fail_proj_opt",
+             "cand_passed")
+
+
+def merge_diagnostics(run: Dict[str, Any], mo: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Merge attempts of the maps created after the main loss (place_recognition.csv, patch 0005)."""
+    pr_path, fl_path = run["dir"] / "algorithm" / "place_recognition.csv", run["dir"] / "algorithm" / "frame_log.csv"
+    if mo.get("loss_rel_s") is None or not pr_path.exists():
+        return None
+    import pandas as pd
+    t0_s = run["t0"] * 1e-9
+    pr = pd.read_csv(pr_path)
+    pr["rel"] = pr["kf_time_s"] - t0_s
+    post = pr[(pr["map_id"] != mo["last_ok_map"]) & (pr["rel"] >= mo["loss_rel_s"])]
+    checked = post[post["event"] == "bow_query"]
+    merge = post[post["kind"] == "merge"]
+    cands = merge[merge["event"].isin(PR_STAGES)]
+    reached = cands["event"].map(PR_STAGES.index)
+    out = {"post_loss_maps": sorted(set(post["map_id"].tolist()) | ({mo["recovered_map"]} if mo.get("recovered_map") is not None else set())),
+           "kfs_skipped_small_map": int(post.loc[post["event"] == "skip_small_map", "kf_id"].nunique()),
+           "kfs_checked": int(checked["kf_id"].nunique()),
+           "first_check_rel_s": float(checked["rel"].min()) if len(checked) else None,
+           "merge_bow_candidates": int(len(cands)),
+           "kfs_with_merge_candidates": int((checked[checked["kind"] == "merge"]["n_candidates"] > 0).sum()),
+           "stage_counts": {s.replace("cand_", ""): int((cands["event"] == s).sum()) for s in PR_STAGES
+                            if (cands["event"] == s).any()},
+           "best_stage": PR_STAGES[int(reached.max())].replace("cand_", "") if len(cands) else None,
+           "max_bow": float(cands["bow_matches"].max()) if len(cands) else None,
+           "max_proj_opt": float(cands["proj_opt_matches"].max()) if len(cands) else None,
+           "refine_ok": int((merge["event"] == "refine_ok").sum()),
+           "refine_fail": int((merge["event"] == "refine_fail").sum()),
+           "merge_detected_rel_s": (float(merge.loc[merge["event"] == "detected", "rel"].min())
+                                    if (merge["event"] == "detected").any() else None)}
+    if fl_path.exists():
+        fl = pd.read_csv(fl_path)
+        if "map_kfs" in fl.columns:
+            fl["rel"] = (fl["timestamp_ns"] - run["t0"]) * 1e-9
+            fl = fl[fl["map_id"].isin(out["post_loss_maps"]) & (fl["map_id"] != mo["last_ok_map"])]
+            if len(fl):
+                last = fl.iloc[-1] if out["merge_detected_rel_s"] is None else fl[fl["rel"] < out["merge_detected_rel_s"]].iloc[-1]
+                out["new_map_kfs"], out["new_map_points"] = int(last["map_kfs"]), int(last["map_points"])
+                out["new_map_size_at_rel_s"] = float(last["rel"])
     return out
 
 
@@ -252,13 +301,16 @@ def main() -> int:
     same_inputs = len({json.dumps(r["cfg"]["dataset"], sort_keys=True) for r in all_runs}) == 1
     prep = {json.loads((r["dir"] / "prepared_input.json").read_text()).get("directory") for r in all_runs}
     gits = sorted({r["git"] for r in all_runs})
+    images = {n: sorted({r["image"] for r in variants[n]}) for n in names}
     rep += ["## Controls",
             f"* Dataset config identical across all runs: {'yes' if same_inputs else '**NO**'}; prepared input "
             f"directories: {', '.join(f'`{p}`' for p in sorted(prep))}",
-            f"* Settings identical except `clahe` across variants: "
+            f"* Settings identical except CLAHE settings ({', '.join(CLAHE_KEYS)}) across variants: "
             f"{'yes' if len({f for v in fps.values() for f in v}) == 1 else '**NO** – check configs'}",
             f"* Git commits: {', '.join(gits) or 'unknown'}; hosts: "
             f"{', '.join(sorted({str(r['host']) for r in all_runs}))}",
+            "* Estimator image (sha256 prefix) per variant: "
+            + "; ".join(f"{n}: {', '.join(images[n])}" for n in names),
             "* Accuracy = aligned benchmark accuracy (Sim(3) fitted per coordinate session over the whole session, "
             "using its ground truth). `online` = pose returned at each frame; `final` = trajectory saved at "
             "shutdown (largest map only). New monocular maps have their own frame and scale.", ""]
@@ -456,6 +508,33 @@ def main() -> int:
             table(["variant", "run", "loss at (s)", "new map at (s)", "OK again at (s)", "recovery", "map",
                    "later frame change, same map id (s)", "post-recovery frames in final traj.", "states while lost"],
                   cont)]
+
+    # ---------------- merge attempts (needs place_recognition.csv from ORB-SLAM3 patch 0005)
+    mrows = []
+    for n in names:
+        for r in variants[n]:
+            md = merge_diagnostics(r, main_outage(r, W))
+            if md is None:
+                continue
+            mrows.append([n, r["run_id"], ",".join(map(str, md["post_loss_maps"])), md["kfs_skipped_small_map"],
+                          md["first_check_rel_s"], md["kfs_checked"], md["kfs_with_merge_candidates"],
+                          md["merge_bow_candidates"],
+                          ", ".join(f"{k} {v}" for k, v in md["stage_counts"].items()) or "–",
+                          md["max_bow"], md["max_proj_opt"], f"{md['refine_ok']}/{md['refine_ok'] + md['refine_fail']}",
+                          md["merge_detected_rel_s"],
+                          (f"{md['new_map_kfs']} KFs / {md['new_map_points']} pts @ {md['new_map_size_at_rel_s']:.0f} s"
+                           if "new_map_kfs" in md else "–")])
+    if mrows:
+        rep += ["", "## Merge attempts of the post-loss maps",
+                "From ORB-SLAM3's place recognition (place_recognition.csv). A map is only checked once it has "
+                "≥ 12 keyframes. Each merge candidate (keyframe of another map found by bag of words) passes "
+                "bow (≥ 20 BoW matches) → sim3 (RANSAC, ≥ 15 inliers) → proj (≥ 50 projection matches) → opt "
+                "(≥ 20 after Sim3 optimisation) → proj_opt (≥ 80) → passed (+ covisibility). A merge then "
+                "needs 3 consistent keyframes (refine checks). `fail_X` = rejected at stage X.", "",
+                table(["variant", "run", "post-loss maps", "KFs skipped (map < 12 KFs)", "first check at (s)",
+                       "KFs checked", "KFs with merge candidates", "merge candidates", "rejected at stage",
+                       "max BoW matches", "max proj-opt matches", "refine ok/total", "merge detected at (s)",
+                       "post-loss map size (last, before merge)"], mrows)]
 
     # ---------------- plot
     try:

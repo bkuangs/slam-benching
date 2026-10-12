@@ -266,6 +266,7 @@ def _run_stages(cfg, evaluate, log, run_dir, status, stage, finish) -> Path:
         return finish(RunStatus.CONFIG_REJECTED, f"invalid configuration: {type(exc).__name__}: {exc}", exc=exc)
     s = cfg["algorithm"]["settings"]
     status["config_summary"].update({"loop_closure": s.get("loop_closure"), "clahe": s.get("clahe"),
+                                     "clahe_clip_limit": s.get("clahe_clip_limit") if s.get("clahe") else None,
                                      "playback_rate": s.get("playback_rate")})
     _dump_config(run_dir, cfg)
 

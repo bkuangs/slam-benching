@@ -81,6 +81,9 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   input-image pixels with status unmatched / inlier / outlier), `sparse_map_points`
   (`map_points.csv`) and `sparse_map_keyframes` (`keyframes.csv`); rows with `in_final_frame=1` are
   in the final trajectory's world frame. Formats: `slambench/artifacts.py`. Used by the replay viewer.
+  ORB-SLAM3 also writes `place_recognition` (`place_recognition.csv`: every loop/merge check, its
+  candidates and the stage at which each was rejected; columns documented in patch 0005), and its
+  `frame_log.csv` records the active map's keyframe and map-point count per frame.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

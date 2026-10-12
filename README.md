@@ -113,8 +113,9 @@ algorithm:
 execution:  {timeout_s: 3600}
 evaluation: {alignment: se3, association_max_dt_s: 0.02, rpe: [{delta: 1.0, unit: m}, {delta: 1.0, unit: s}]}
 ```
-Preprocessing (e.g. `clahe`) is off by default and recorded when enabled. Every summary row carries
-the `experiment` name and the `clahe` setting, so preprocessing variants of the same estimator (e.g.
+Preprocessing (e.g. `clahe`) is off by default and recorded when enabled; its strength is set by
+`clahe_clip_limit` (default 3.0, lower = gentler) and `clahe_tile_grid` (default 8). Every summary row
+carries the `experiment` name and the `clahe` / `clahe_clip_limit` settings, so preprocessing variants of the same estimator (e.g.
 `subtmrs_smokeroom_orbslam3_mono` vs `..._mono_clahe`) are separate, comparable entries. Loop closure is an
 explicit setting recorded in every summary row; keep it constant within a comparison.
 `playback_rate: 1.0` feeds frames at the recorded rate (estimator threads behave as online);
