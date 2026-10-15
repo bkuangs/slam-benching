@@ -97,6 +97,15 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   changes when the optimized graph's root node changes (new or joined maps). The adapter sets
   `Stereo/OpticalFlow=false` by default (setting `stereo_optical_flow`): with RTAB-Map's default KLT
   stereo correspondences, LunaPolaris odometry absorbed forward motion as ~30°/m of pitch drift.
+  **Map reuse** (setting `map_run: <mapping run dir>`): the run copies that run's `rtabmap.db`,
+  checks that all RTAB-Map parameters equal the mapping run's except `Mem/IncrementalMemory=false`
+  and `Mem/InitWMWithAllNodes=true`, and the driver (`--localize`) localizes against the map in a
+  fresh process without saving it back. Only an online trajectory (`coordinate_sessions: single`,
+  the map's frame) is produced, starting at the first accepted loop-closure / proximity link;
+  earlier frames carry only RTAB-Map's prior (last pose saved in the map) and have tracking state
+  `not_localized`. `extra.map_reuse` records the map database hash before/after (the run fails if
+  it changed) and `map_frame_check`, which compares the loaded node poses with the mapping run's
+  final graph (the run fails unless they are identical, since evaluation relies on that frame).
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

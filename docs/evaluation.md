@@ -99,6 +99,29 @@ as completion.
   time ≈ sequence duration and is *not* a throughput number; `tracking_throughput_fps`
   (= frames / Σ tracking time) is the offline throughput of the tracking thread.
 
+## Map reuse (`map_reuse`, localization runs only)
+A localization run (RTAB-Map `map_run`) reports poses in the saved map's frame. They are scored in
+that **fixed frame**: the map->GT transform is the rigid SE(3) alignment of the *mapping* run's final
+trajectory (its `eval/metrics.json`, which must be one coordinate session), never fitted on the
+localization run. Fitting it per traversal would hide localizations into the wrong part of the map.
+The standard `accuracy` section is still computed (aligned, for reference). Section contents
+(settings under `evaluation.map_reuse`):
+* `initialization`: data time, processing time, frame index and GT distance travelled until the
+  first accepted localization, and the error right after it. Map loading is `computation.map_load_s`.
+* `coverage`: fraction of the input duration with a localized pose (sticky after the first
+  localization; between localizations the pose is odometry-propagated), with an accepted
+  localization at most `staleness_s` old, and *correctly* localized (error <= each
+  `error_thresholds_m`).
+* `localization_events`: every accepted loop-closure / proximity link to a map node with the error
+  before and after it. A **false relocalization** is an event after which the error exceeds
+  `false_relocalization_m` or `false_relocalization_deg`; rejected hypotheses are counted.
+* `error_fixed_frame`: translation / rotation error of localized frames; `error_prior_only`: error
+  of the poses before the first localization (not counted as localized).
+* `computation`: per-frame and per-map-update time, real-time factor (sequence duration / summed
+  processing time), map load time, wall time, peak RSS.
+Per-frame errors are written to `eval/map_reuse_frames.csv`, the error plot to `eval/map_reuse.png`.
+Replaying the mapping sequence against its own map is a software check, not a map-reuse result.
+
 ## Not implemented / reported as unavailable
 * Orientation metrics with position-only GT.
 * Camera–mocap time-offset estimation (none is applied; LunaPolaris publishes none).

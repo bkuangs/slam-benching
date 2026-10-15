@@ -70,13 +70,21 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "cloud_max_range": 5.0,        # rtabmap-export --max_range (m)
     "cloud_decimation": 2,         # rtabmap-export --decimation (image decimation)
     "extra_parameters": {},        # raw RTAB-Map parameters, e.g. {"Odom/Strategy": 1}
+    # Map reuse: path of an earlier RTAB-Map *mapping* run directory. The run then localizes against
+    # a copy of that run's rtabmap.db (Mem/IncrementalMemory=false, Mem/InitWMWithAllNodes=true)
+    # instead of building a map; no final trajectory and no map export are produced.
+    "map_run": None,
 }
+
+# Parameters allowed to differ between a localization run and the mapping run whose map it loads.
+_LOCALIZATION_PARAMS = {"Mem/IncrementalMemory": "false", "Mem/InitWMWithAllNodes": "true"}
 
 # Parameters the adapter sets from named settings or relies on; extra_parameters must not override them.
 _MANAGED = {"Rtabmap/DetectionRate", "Vis/MaxFeatures", "Stereo/OpticalFlow", "Kp/MaxFeatures",
             "RGBD/ProximityBySpace",
             "Grid/CellSize", "Grid/RangeMax", "Grid/RayTracing", "Grid/GroundIsObstacle", "Grid/3D",
-            "Grid/Sensor", "RGBD/CreateOccupancyGrid", "Mem/IncrementalMemory", "Mem/BinDataKept"}
+            "Grid/Sensor", "RGBD/CreateOccupancyGrid", "Mem/IncrementalMemory", "Mem/BinDataKept",
+            "Mem/InitWMWithAllNodes"}
 # Unsupported because the final trajectory construction assumes continuous odometry.
 _FORBIDDEN = {"Odom/ResetCountdown": "odometry resets would break the final-trajectory construction",
               "RGBD/NewMapOdomChangeDistance": "new maps on odometry jumps are not handled yet"}
@@ -92,6 +100,14 @@ def driver_source_sha1() -> Optional[str]:
             h.update((DRIVER_SOURCE_DIR / n).read_bytes())
     except OSError:
         return None
+    return h.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
     return h.hexdigest()
 
 
@@ -158,7 +174,49 @@ class RtabmapAdapter(AlgorithmAdapter):
         d = out["cloud_decimation"]
         if isinstance(d, bool) or int(d) != d or int(d) < 1:
             raise ValueError(f"cloud_decimation must be an integer >= 1, got {d}")
+        if out["map_run"] is not None:
+            out["map_run"] = str(Path(out["map_run"]).expanduser().resolve())
         return out
+
+    # ---- map reuse ---------------------------------------------------------
+    @staticmethod
+    def localizing(settings: Dict[str, Any]) -> bool:
+        return settings.get("map_run") is not None
+
+    @staticmethod
+    def map_database(settings: Dict[str, Any]) -> Path:
+        return Path(settings["map_run"]) / "algorithm" / "rtabmap.db"
+
+    @staticmethod
+    def _read_params_file(path: Path) -> Dict[str, str]:
+        out = {}
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def _map_reuse_problems(self, settings: Dict[str, Any]) -> List[str]:
+        run = Path(settings["map_run"])
+        problems = []
+        for f in ("algorithm/rtabmap.db", "algorithm/rtabmap_params.txt", "algorithm/nodes.csv",
+                  "config.resolved.yaml"):
+            if not (run / f).is_file():
+                problems.append(f"map_run {run} has no {f} (not a completed RTAB-Map mapping run?)")
+        if problems:
+            return problems
+        map_params = self._read_params_file(run / "algorithm" / "rtabmap_params.txt")
+        if map_params.get("Mem/IncrementalMemory") != "true":
+            problems.append(f"map_run {run} is not a mapping run (Mem/IncrementalMemory != true)")
+        mine = self.parameters(settings)
+        diff = sorted(k for k in set(mine) | set(map_params)
+                      if k not in _LOCALIZATION_PARAMS and mine.get(k) != map_params.get(k))
+        if diff:
+            problems.append("localization parameters must equal the mapping run's (features, "
+                            "vocabulary and registration must match the map); differing: "
+                            + ", ".join(f"{k}: map={map_params.get(k)} here={mine.get(k)}" for k in diff))
+        return problems
 
     def validate(self, mode, dataset, settings) -> List[str]:
         problems = super().validate(mode, dataset, settings)
@@ -173,6 +231,8 @@ class RtabmapAdapter(AlgorithmAdapter):
             return problems + [f"cannot read camera calibration: {exc}"]
         if calib is None or calib.right is None:
             return problems + ["RTAB-Map stereo needs a stereo camera calibration"]
+        if self.localizing(settings):
+            problems += self._map_reuse_problems(settings)
         for cam in (calib.left, calib.right):
             if cam.model != "pinhole" or not cam.rectified or any(abs(float(k)) > 0 for k in cam.distortion):
                 problems.append("RTAB-Map adapter needs rectified, undistorted pinhole stereo images "
@@ -254,6 +314,8 @@ class RtabmapAdapter(AlgorithmAdapter):
         }
         if not s["loop_closure"]:
             p["RGBD/ProximityBySpace"] = False
+        if self.localizing(s):
+            p.update(_LOCALIZATION_PARAMS)
         p.update(s["extra_parameters"])
         return {k: _param_value(v) for k, v in p.items()}
 
@@ -262,6 +324,15 @@ class RtabmapAdapter(AlgorithmAdapter):
         lines = ["# Generated by slam-benching; one RTAB-Map parameter per line (others = defaults)."]
         lines += [f"{k}={v}" for k, v in sorted(self.parameters(ctx.settings).items())]
         (ctx.algo_dir / "rtabmap_params.txt").write_text("\n".join(lines) + "\n")
+        if self.localizing(ctx.settings):
+            src = self.map_database(ctx.settings)
+            info = {"map_run": ctx.settings["map_run"], "map_database": str(src),
+                    "map_database_sha256_before": _file_sha256(src)}
+            dst = ctx.algo_dir / "rtabmap.db"
+            shutil.copyfile(src, dst)
+            if _file_sha256(dst) != info["map_database_sha256_before"]:
+                raise RuntimeError(f"copy of {src} differs from the original")
+            (ctx.algo_dir / "map_source.json").write_text(json.dumps(info, indent=2) + "\n")
 
     def _binds(self, ctx: RunContext) -> List[str]:
         paths = {ctx.prepared.directory.resolve(), ctx.algo_dir.resolve()}
@@ -285,11 +356,13 @@ class RtabmapAdapter(AlgorithmAdapter):
                 "--playback-rate", str(float(s["playback_rate"]))]
         if s["log_features"]:
             args.append("--log-features")
+        if self.localizing(s):
+            args.append("--localize")
         return args
 
     def export_args(self, ctx: RunContext) -> Optional[List[str]]:
         s = ctx.settings
-        if not (s["export_cloud"] or s["export_octomap"]):
+        if self.localizing(s) or not (s["export_cloud"] or s["export_octomap"]):
             return None
         d = str(ctx.algo_dir.resolve())
         args = ["rtabmap-export", "--output_dir", d, "--output", EXPORT_NAME, "--opt", "2"]
@@ -338,6 +411,15 @@ class RtabmapAdapter(AlgorithmAdapter):
                 except (TypeError, ValueError, KeyError):
                     malformed += 1
                     continue
+                try:  # absent in logs of drivers older than the map-reuse mode
+                    row.update({"localized": int(r.get("localized") or 0) == 1,
+                                "loc_event": int(r.get("loc_event") or 0) == 1,
+                                "loc_rejected": int(r.get("loc_rejected") or 0) == 1,
+                                "loc_correction_m": float(r.get("loc_correction_m") or 0.0),
+                                "slam_time_s": float(r.get("slam_time_s") or 0.0)})
+                except ValueError:
+                    malformed += 1
+                    continue
                 row["pose"] = _parse_pose(r, POSE_COLUMNS) if row["odom_ok"] else None
                 row["odom"] = _parse_pose(r, ODOM_COLUMNS) if row["odom_ok"] else None
                 rows.append(row)
@@ -381,6 +463,117 @@ class RtabmapAdapter(AlgorithmAdapter):
             poses.append(corr[k] @ _pose_T(r["odom"]))
         return np.array(ts, dtype=np.int64), np.array(poses).reshape(-1, 4, 4)
 
+    @staticmethod
+    def read_pose_csv(path: Path) -> Dict[int, np.ndarray]:
+        out = {}
+        if not path.exists():
+            return out
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f):
+                p = _parse_pose(r, POSE_COLUMNS)
+                if p is not None and r.get("node_id"):
+                    out[int(r["node_id"])] = p
+        return out
+
+    def _map_frame_check(self, ctx: RunContext) -> Dict[str, Any]:
+        """Loaded map node poses vs the mapping run's final optimized nodes: the localization frame
+        must be the mapping run's final frame for its map->GT transform to apply."""
+        loaded = self.read_pose_csv(ctx.algo_dir / "map_loaded_nodes.csv")
+        mapping = {n["id"]: n["opt"] for n in self.read_nodes(Path(ctx.settings["map_run"]) / "algorithm" / "nodes.csv")
+                   if n["in_final"] and n["opt"] is not None}
+        common = sorted(set(loaded) & set(mapping))
+        out: Dict[str, Any] = {"n_loaded_nodes": len(loaded), "n_mapping_final_nodes": len(mapping),
+                               "n_common": len(common)}
+        if common:
+            dt = [float(np.linalg.norm(loaded[k][:3] - mapping[k][:3])) for k in common]
+            dr = [float(np.degrees((Rotation.from_quat(loaded[k][3:]).inv()
+                                    * Rotation.from_quat(mapping[k][3:])).magnitude())) for k in common]
+            out.update({"max_translation_diff_m": max(dt), "max_rotation_diff_deg": max(dr)})
+            out["same_frame"] = bool(len(common) == len(loaded) == len(mapping)
+                                     and max(dt) < 1e-3 and max(dr) < 0.05)
+        else:
+            out["same_frame"] = False
+        return out
+
+    def _collect_localization(self, ctx, returncode, timed_out, frames_ts, extra, driver_status):
+        d = ctx.algo_dir
+        log_rows, n_malformed = self.read_frame_log(d / "frame_log.csv")
+        extra["n_frame_log_rows_malformed"] = n_malformed
+        src = json.loads((d / "map_source.json").read_text()) if (d / "map_source.json").exists() else {}
+        orig = Path(src["map_database"]) if src.get("map_database") else self.map_database(ctx.settings)
+        src["map_database_sha256_after"] = _file_sha256(orig) if orig.exists() else None
+        src["map_database_unchanged"] = (src["map_database_sha256_after"] is not None and
+                                         src["map_database_sha256_after"] == src.get("map_database_sha256_before"))
+        load = json.loads((d / "map_load.json").read_text()) if (d / "map_load.json").exists() else {}
+        n_ok = sum(r["odom_ok"] for r in log_rows)
+        loc = [r for r in log_rows if r["pose"] is not None and r["localized"]]
+        events = [r for r in log_rows if r["loc_event"]]
+        extra["map_reuse"] = {
+            **src, "map_load": load, "map_frame_check": self._map_frame_check(ctx),
+            "n_localization_events": len(events),
+            "n_rejected_hypotheses": sum(r["loc_rejected"] for r in log_rows),
+            "first_localization_frame_idx": next((r["frame_idx"] for r in log_rows if r["localized"]), None),
+            "n_localized_poses": len(loc),
+            "n_prior_only_poses": sum(r["pose"] is not None and not r["localized"] for r in log_rows)}
+        extra.update({"n_frames_input": int(len(frames_ts)), "n_frames_logged": len(log_rows),
+                      "n_frames_tracking_ok": n_ok, "n_online_poses": len(loc)})
+
+        trajectories: List[TrajectoryOutput] = []
+        if loc:
+            P = np.array([r["pose"] for r in loc])
+            otraj = Trajectory(np.array([r["timestamp_ns"] for r in loc], dtype=np.int64), P[:, :3], P[:, 3:],
+                               frame="cam0",
+                               meta={"source": str(d / "frame_log.csv"), "estimator": "RTAB-Map localization",
+                                     "content": "map correction x odometry in the loaded map's frame, frames "
+                                                "from the first accepted localization on; left camera frame"})
+            online_path = ctx.run_dir / "trajectory_online.tum"
+            write_tum(otraj, online_path)
+            trajectories.append(TrajectoryOutput(
+                "online", online_path, "cam0",
+                "pose in the saved map's frame after each frame (localization mode), from the first "
+                "accepted localization on", coordinate_sessions="single"))
+
+        diag_path = None
+        if log_rows:
+            diag_path = ctx.run_dir / "frame_diagnostics.csv"
+            with open(diag_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(FRAME_DIAGNOSTICS_COLUMNS)
+                for r in log_rows:
+                    state = ("lost" if not r["odom_ok"] else "localized" if r["localized"] else "not_localized")
+                    w.writerow([r["timestamp_ns"], state, int(r["odom_ok"] and r["localized"] and r["pose"] is not None),
+                                0, r["track_time_s"], 0, 0])
+
+        artifacts = {k: d / n for k, n in (("tracked_features", "features.bin"),
+                                             ("map_loaded_nodes", "map_loaded_nodes.csv"))
+                     if (d / n).exists() and (d / n).stat().st_size > 0}
+        avail = {"tracking_state": bool(log_rows), "map_id": False,
+                 "tracked_features": "tracked_features" in artifacts, "sparse_map": False,
+                 "coordinate_session": bool(log_rows), "per_frame_time": bool(log_rows),
+                 "online_pose": bool(loc)}
+        common = dict(frame_diagnostics=diag_path, diagnostics_available=avail, extra=extra,
+                      trajectories=trajectories, artifacts=artifacts)
+        mr = extra["map_reuse"]
+        if timed_out:
+            return AlgorithmOutput(RunStatus.TIMEOUT, "execution timed out", **common)
+        if returncode is None or returncode != 0:
+            msg = f"driver exited with code {returncode}"
+            if driver_status.get("status") and driver_status["status"] != "completed":
+                msg += f"; driver status {driver_status['status']}: {driver_status.get('message', '')}"
+            return AlgorithmOutput(RunStatus.CRASH, msg, **common)
+        if not log_rows:
+            return AlgorithmOutput(RunStatus.MISSING_OUTPUT, "frame_log.csv missing", **common)
+        if not mr["map_database_unchanged"]:
+            return AlgorithmOutput(RunStatus.CRASH, "the mapping run's database changed during the run", **common)
+        if not mr["map_frame_check"].get("same_frame"):
+            return AlgorithmOutput(RunStatus.CRASH, "loaded map poses differ from the mapping run's final "
+                                   f"graph: {mr['map_frame_check']}", **common)
+        if not loc:
+            return AlgorithmOutput(RunStatus.INIT_FAILURE,
+                                   f"never localized against the map in {len(log_rows)} frames "
+                                   f"(odometry valid in {n_ok})", **common)
+        return AlgorithmOutput(RunStatus.SUCCESS, "", **common)
+
     def collect(self, ctx: RunContext, returncode: Optional[int], timed_out: bool) -> AlgorithmOutput:
         d = ctx.algo_dir
         frames_ts = np.loadtxt(ctx.prepared.frames_csv, delimiter=",", skiprows=1, usecols=0,
@@ -393,6 +586,8 @@ class RtabmapAdapter(AlgorithmAdapter):
             except json.JSONDecodeError as exc:
                 extra["driver_status_unreadable"] = str(exc)
         extra["driver_status"] = driver_status
+        if self.localizing(ctx.settings):
+            return self._collect_localization(ctx, returncode, timed_out, frames_ts, extra, driver_status)
 
         log_rows, n_malformed = self.read_frame_log(d / "frame_log.csv")
         nodes = self.read_nodes(d / "nodes.csv")

@@ -51,6 +51,30 @@ def _evaluate_kind(t: TrajectoryOutput, dataset, gt, ecfg, diag, input_ts, mode)
     return acc, gt_sensor.positions
 
 
+def _map_reuse(run_dir, cfg, dataset, gt, ecfg, status, mr_info, input_ts, out_dir):
+    """Fixed-frame map-reuse metrics of a localization run (see map_reuse.py)."""
+    from ..algorithms.rtabmap import RtabmapAdapter
+    from .map_reuse import fixed_alignment_from, map_reuse_metrics
+    if gt is None:
+        return unavailable("dataset provides no ground truth for this sequence")
+    try:
+        fixed = fixed_alignment_from(Path(mr_info["map_run"]))
+    except (OSError, ValueError, KeyError) as exc:
+        return unavailable(f"no fixed map->GT transform: {exc}")
+    T_bs = dataset.T_gt_body_sensor("cam0")
+    if T_bs is None or not gt.has_orientation:
+        return unavailable("ground truth cannot be expressed in the cam0 frame")
+    if fixed.get("T_gt_body_trajectory_frame") is not None and \
+            not np.allclose(fixed["T_gt_body_trajectory_frame"], T_bs, atol=1e-9):
+        return unavailable("GT body->cam0 transform differs between the mapping run and this run")
+    gt_sensor = Trajectory(gt.timestamps_ns, gt.positions, gt.quaternions_xyzw, gt.body_frame).transformed(T_right=T_bs)
+    rows, _ = RtabmapAdapter.read_frame_log(run_dir / "algorithm" / "frame_log.csv")
+    if not rows:
+        return unavailable("no frame log")
+    return map_reuse_metrics(rows, input_ts, gt_sensor, fixed, ecfg.get("map_reuse"), status, mr_info,
+                             ecfg["association_max_dt_s"], out_dir)
+
+
 def evaluate_run(run_dir: Path, dataset=None, eval_cfg: Dict[str, Any] = None) -> Dict[str, Any]:
     """Compute metrics for `run_dir`, write eval/metrics.json and plots, return the metrics.
 
@@ -109,6 +133,10 @@ def evaluate_run(run_dir: Path, dataset=None, eval_cfg: Dict[str, Any] = None) -
                                               f"(run status: {status.get('status')})")
             continue
         m["accuracy"][kind], gt_pos[kind] = _evaluate_kind(t, dataset, gt, ecfg, diag, input_ts, mode)
+
+    mr_info = (algo_out.get("extra") or {}).get("map_reuse")
+    if mr_info is not None:
+        m["map_reuse"] = _map_reuse(run_dir, cfg, dataset, gt, ecfg, status, mr_info, input_ts, out_dir)
 
     playback = (cfg["algorithm"].get("settings") or {}).get("playback_rate")
     m["timing"] = timing_metrics(diag, input_ts, status, playback)

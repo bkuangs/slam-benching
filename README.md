@@ -104,6 +104,12 @@ are counted, not drawn); map growth over time is not recorded. Monocular maps ca
 session scale estimate as the trajectory.
 Any config value can be overridden: `--set algorithm.settings.loop_closure=false`.
 
+### Map reuse (RTAB-Map)
+Run a mapping config (e.g. `configs/lunapolaris_seq01_rtabmap_stereo.yaml`), put its run directory
+into a `configs/lunapolaris_mapreuse_*` config as `algorithm.settings.map_run`, then run that config:
+it localizes another sequence against a copy of the saved map in a fresh process and scores it in
+the map's fixed frame (`map_reuse` in `eval/metrics.json`; see docs/evaluation.md).
+
 ### Experiment config
 ```yaml
 name: lunapolaris_seq01_orbslam3_stereo

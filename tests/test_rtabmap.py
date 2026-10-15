@@ -26,12 +26,13 @@ def _vec(T):
     return list(T[:3, 3]) + list(Rotation.from_matrix(T[:3, :3]).as_quat())
 
 
-def _ctx(tmp_path, settings=None):
+def _ctx(tmp_path, settings=None, algo="algo"):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     ds = FakeDataset(tmp_path, "s1")
     (tmp_path / "prep").mkdir(exist_ok=True)
     prep = ds.prepare_offline(SensorMode.STEREO, tmp_path / "prep")
     a = RtabmapAdapter({"container": str(tmp_path / "x.sif")})
-    return a, ds, RunContext(tmp_path, tmp_path / "algo", ds, SensorMode.STEREO, prep,
+    return a, ds, RunContext(tmp_path, tmp_path / algo, ds, SensorMode.STEREO, prep,
                              a.resolve_settings(settings or {}))
 
 
@@ -133,3 +134,104 @@ def test_collect_flags_missing_export_and_failures(tmp_path):
     assert a.collect(ctx, None, True).status == RunStatus.TIMEOUT
     _write_outputs(ctx, ds, lost=(0, 10 ** 6))
     assert a.collect(ctx, 0, False).status == RunStatus.INIT_FAILURE
+
+
+def _mapping_run(tmp_path):
+    """A fake completed mapping run: outputs of _write_outputs plus params, config and eval."""
+    a, ds, ctx = _ctx(tmp_path / "map", algo="algorithm")
+    a.prepare(ctx)
+    _write_outputs(ctx, ds)
+    (ctx.algo_dir / "rtabmap.db").write_bytes(b"map database")
+    (tmp_path / "map" / "config.resolved.yaml").write_text("name: m\n")
+    A = make_T(Rotation.from_euler("z", 0.2).as_matrix(), [1.0, 2.0, 0.0])   # map -> GT
+    (tmp_path / "map" / "eval").mkdir()
+    (tmp_path / "map" / "eval" / "metrics.json").write_text(json.dumps({
+        "run_id": "m", "sequence": "s1", "accuracy": {"final": {
+            "sessions": [{"alignment": {"type": "se3", "R": A[:3, :3].tolist(), "t": A[:3, 3].tolist()}}],
+            "ate": {"translation_m": {"rmse": 0.01}}, "ground_truth": {}}}}))
+    return tmp_path / "map", ds, A
+
+
+def _write_localization(ctx, ds, map_run, A, first=50, false_at=150):
+    """Prior-only (wrong) poses before `first`, correct map-frame poses after, a 2 m wrong
+    relocalization at `false_at` (corrected at false_at + 20)."""
+    d = ctx.algo_dir
+    with open(d / "map_loaded_nodes.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["node_id", *POSE_COLUMNS])
+        for r in csv.DictReader(open(map_run / "algorithm" / "nodes.csv")):
+            w.writerow([r["node_id"], *[r[c] for c in POSE_COLUMNS]])
+    gt = sample(ds.gt, ds.frames).poses()
+    Ainv = np.linalg.inv(A)
+    with open(d / "frame_log.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(LOG_COLS + ["localized", "loc_event", "loc_rejected", "loc_correction_m"])
+        for i, t in enumerate(ds.frames):
+            P = Ainv @ gt[i]
+            if i < first:
+                P = make_T(np.eye(3), [3.0, 0, 0]) @ P
+            if false_at <= i < false_at + 20:
+                P = make_T(np.eye(3), [0, 2.0, 0]) @ P
+            ev = i in (first, false_at, false_at + 20, 250)
+            w.writerow([i, t, 1, 500, 120, 150, 800, 0, int(i % 15 == 0), 0, 0, -1, 7 if ev else 0, 0, 10,
+                        0.01, 0.2 if i % 15 == 0 else 0, 0.03, 0, *_vec(P), *_vec(gt[i]),
+                        int(i >= first), int(ev), int(i == 10), 0.5 if ev else 0])
+    (d / "map_load.json").write_text(json.dumps({"init_time_s": 1.5, "n_map_nodes": 3}))
+    (d / "driver_status.json").write_text(json.dumps({"status": "completed", "message": ""}))
+
+
+def test_localization_mode_settings_and_command(tmp_path):
+    map_run, _, _ = _mapping_run(tmp_path)
+    a, ds, ctx = _ctx(tmp_path / "loc", {"map_run": str(map_run)})
+    assert a.parameters(ctx.settings)["Mem/IncrementalMemory"] == "false"
+    assert a.parameters(ctx.settings)["Mem/InitWMWithAllNodes"] == "true"
+    assert a._map_reuse_problems(ctx.settings) == []
+    a.prepare(ctx)
+    assert (ctx.algo_dir / "rtabmap.db").read_bytes() == b"map database"
+    script = a.command(ctx)[-1]
+    assert "--localize" in script and "rtabmap-export" not in script
+    bad = a.resolve_settings({"map_run": str(map_run), "vis_max_features": 500})
+    assert "Vis/MaxFeatures" in a._map_reuse_problems(bad)[0]
+    assert "no algorithm/rtabmap.db" in a._map_reuse_problems(a.resolve_settings({"map_run": str(tmp_path)}))[0]
+
+
+def test_localization_collect_and_fixed_frame_metrics(tmp_path):
+    from slambench.evaluation.map_reuse import fixed_alignment_from, map_reuse_metrics
+    map_run, _, A = _mapping_run(tmp_path)
+    a, ds, ctx = _ctx(tmp_path / "loc", {"map_run": str(map_run)})
+    a.prepare(ctx)
+    _write_localization(ctx, ds, map_run, A)
+    out = a.collect(ctx, 0, False)
+    assert out.status == RunStatus.SUCCESS, out.message
+    mr = out.extra["map_reuse"]
+    assert mr["map_database_unchanged"] and mr["map_frame_check"]["same_frame"]
+    assert mr["first_localization_frame_idx"] == 50 and mr["n_localization_events"] == 4
+    assert [t.kind for t in out.trajectories] == ["online"]
+    assert out.trajectories[0].coordinate_sessions == "single"
+    assert len(read_tum(tmp_path / "loc" / "trajectory_online.tum")) == len(ds.frames) - 50
+    rows = list(csv.DictReader(open(tmp_path / "loc" / "frame_diagnostics.csv")))
+    assert rows[0]["tracking_state"] == "not_localized" and rows[50]["tracking_ok"] == "1"
+
+    # a changed map database or a different loaded map frame invalidates the run
+    (map_run / "algorithm" / "rtabmap.db").write_bytes(b"changed")
+    assert a.collect(ctx, 0, False).status == RunStatus.CRASH
+    (map_run / "algorithm" / "rtabmap.db").write_bytes(b"map database")
+
+    log, _ = a.read_frame_log(ctx.algo_dir / "frame_log.csv")
+    gt = sample(ds.gt, ds.gt.timestamps_ns)
+    fixed = fixed_alignment_from(map_run)
+    m = map_reuse_metrics(log, np.array(ds.frames), gt, fixed, {}, {"wall_time_s": 9.0},
+                          mr, 0.02, tmp_path)
+    ini = m["initialization"]
+    assert ini["frame_idx"] == 50 and ini["error_at_first_localization_m"] < 1e-6
+    ev = m["localization_events"]
+    assert ev["n_events"] == 4 and ev["n_false_relocalizations"] == 1 and ev["n_rejected_hypotheses"] == 1
+    assert [e["false_relocalization"] for e in ev["events"]] == [False, True, False, False]
+    n = len(ds.frames)
+    cov = m["coverage"]
+    assert abs(cov["localized_fraction"] - (n - 50) / n) < 0.01
+    assert abs(cov["correctly_localized_fraction"]["0.1m"] - (n - 70) / n) < 0.01
+    assert m["error_fixed_frame"]["translation_m"]["max"] > 1.9
+    assert m["error_prior_only"]["translation_m"]["min"] > 2.9
+    assert m["computation"]["map_load_s"] == 1.5 and m["computation"]["n_map_updates"] > 0
+    assert (tmp_path / "map_reuse_frames.csv").exists()
