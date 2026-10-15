@@ -64,6 +64,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -270,6 +271,7 @@ int main(int argc, char **argv) {
     bool any_update = false;
     int last_node = 0, root = 0;
     long coord_session = 0;
+    cv::Mat pending_cov;
     const long long update_period_ns = detection_rate > 0 ? static_cast<long long>(1e9 / detection_rate) : 0;
 
     for (size_t i = 0; i < frames.size(); ++i) {
@@ -303,10 +305,19 @@ int main(int argc, char **argv) {
         const bool odom_ok = !odom_base.isNull();
         ++fed;
 
+        // As RtabmapThread: keep the largest valid odometry covariance since the last map update
+        // (independent of the odometry frame rate); 1.0 marks an unset covariance.
+        if (odom_ok && !info.reg.covariance.empty()) {
+            const double c00 = info.reg.covariance.at<double>(0, 0);
+            if (std::isfinite(c00) && c00 != 1.0 && c00 > 0.0 &&
+                (pending_cov.empty() || c00 > pending_cov.at<double>(0, 0)))
+                pending_cov = info.reg.covariance.clone();
+        }
         bool updated = false, added = false;
         double slam_s = 0.0;
         if (odom_ok && (!any_update || update_period_ns == 0 || fr.t_ns - last_update_ns >= update_period_ns)) {
-            cv::Mat cov = info.reg.covariance.empty() ? cv::Mat::eye(6, 6, CV_64FC1) : info.reg.covariance;
+            cv::Mat cov = pending_cov.empty() ? cv::Mat::eye(6, 6, CV_64FC1) : pending_cov;
+            pending_cov = cv::Mat();
             const auto s0 = chrono::steady_clock::now();
             slam.process(data, odom_base, cov);
             slam_s = chrono::duration<double>(chrono::steady_clock::now() - s0).count();

@@ -52,6 +52,10 @@ EXPORT_NAME = "rtabmap"
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "detection_rate_hz": 1.0,      # map update rate on data time (Rtabmap/DetectionRate); 0 = every frame
     "vis_max_features": 1000,      # Vis/MaxFeatures (odometry + loop-closure registration)
+    # Stereo/OpticalFlow: RTAB-Map's default KLT stereo correspondences gave a ~30 deg/m pitch drift on
+    # LunaPolaris (forward motion absorbed as rotation); False = descriptor/SSD stereo matching, which
+    # matched ORB-SLAM3's motion direction and orientation.
+    "stereo_optical_flow": False,
     "kp_max_features": 500,        # Kp/MaxFeatures (bag-of-words loop-closure detection)
     "loop_closure": True,          # False -> Kp/MaxFeatures=-1 and no proximity detection
     "grid_cell_size": 0.05,        # Grid/CellSize (m), local grids and OctoMap resolution
@@ -69,7 +73,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 }
 
 # Parameters the adapter sets from named settings or relies on; extra_parameters must not override them.
-_MANAGED = {"Rtabmap/DetectionRate", "Vis/MaxFeatures", "Kp/MaxFeatures", "RGBD/ProximityBySpace",
+_MANAGED = {"Rtabmap/DetectionRate", "Vis/MaxFeatures", "Stereo/OpticalFlow", "Kp/MaxFeatures",
+            "RGBD/ProximityBySpace",
             "Grid/CellSize", "Grid/RangeMax", "Grid/RayTracing", "Grid/GroundIsObstacle", "Grid/3D",
             "Grid/Sensor", "RGBD/CreateOccupancyGrid", "Mem/IncrementalMemory", "Mem/BinDataKept"}
 # Unsupported because the final trajectory construction assumes continuous odometry.
@@ -235,6 +240,7 @@ class RtabmapAdapter(AlgorithmAdapter):
         p: Dict[str, Any] = {
             "Rtabmap/DetectionRate": float(s["detection_rate_hz"]),  # recorded in the DB; driver applies it
             "Vis/MaxFeatures": int(s["vis_max_features"]),
+            "Stereo/OpticalFlow": bool(s["stereo_optical_flow"]),
             "Kp/MaxFeatures": int(s["kp_max_features"]) if s["loop_closure"] else -1,
             "Mem/IncrementalMemory": True,
             "Mem/BinDataKept": True,               # keep images in the DB (reusable map, dense export)

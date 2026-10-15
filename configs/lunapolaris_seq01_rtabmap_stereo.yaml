@@ -21,6 +21,7 @@ algorithm:
   settings:
     detection_rate_hz: 1.0
     loop_closure: true
+    stereo_optical_flow: false   # default KLT stereo matching caused ~30 deg/m pitch drift here
     grid_cell_size: 0.05
     grid_range_max: 5.0
     playback_rate: 1.0

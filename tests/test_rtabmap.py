@@ -80,7 +80,7 @@ def test_parameters_command_and_export(tmp_path):
     a.prepare(ctx)
     text = (ctx.algo_dir / "rtabmap_params.txt").read_text()
     for line in ("RGBD/CreateOccupancyGrid=true", "Grid/RayTracing=true", "Grid/3D=true", "Grid/CellSize=0.05",
-                 "Kp/MaxFeatures=500", "Odom/Strategy=1", "Vis/MinInliers=25", "Mem/IncrementalMemory=true"):
+                 "Kp/MaxFeatures=500", "Stereo/OpticalFlow=false", "Odom/Strategy=1", "Vis/MinInliers=25", "Mem/IncrementalMemory=true"):
         assert line in text.splitlines(), line
     cmd = a.command(ctx)
     assert cmd[-3:-1] == ["/bin/bash", "-c"]

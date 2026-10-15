@@ -94,7 +94,9 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   Its final trajectory gives every frame with valid odometry a pose,
   `T_opt(node) T_odom(node)^-1 T_odom(frame)` with the latest earlier final-graph node; its online
   trajectory is RTAB-Map's map correction times odometry at that frame, and `coordinate_session`
-  changes when the optimized graph's root node changes (new or joined maps).
+  changes when the optimized graph's root node changes (new or joined maps). The adapter sets
+  `Stereo/OpticalFlow=false` by default (setting `stereo_optical_flow`): with RTAB-Map's default KLT
+  stereo correspondences, LunaPolaris odometry absorbed forward motion as ~30°/m of pitch drift.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory
