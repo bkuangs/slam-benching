@@ -84,6 +84,17 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   ORB-SLAM3 also writes `place_recognition` (`place_recognition.csv`: every loop/merge check, its
   candidates and the stage at which each was rejected; columns documented in patch 0005), and its
   `frame_log.csv` records the active map's keyframe and map-point count per frame.
+  RTAB-Map (stereo) writes map artifacts instead of a sparse map: `rtabmap_db` (`rtabmap.db`, the
+  reusable localization map: images, visual words, pose graph, per-node local occupancy grids),
+  `map_nodes` (`nodes.csv`: node id, map id, stamp, cam0 odometry pose and final optimized pose),
+  `map_links` (`links.csv`: final graph constraints and their type), `dense_cloud`
+  (`rtabmap_cloud.ply`), `octomap` (`rtabmap_octomap.bt`: 3D occupancy with occupied / free /
+  unknown space, built from ray-traced stereo local grids) and `octomap_cloud`
+  (`rtabmap_octomap.ply`), all assembled with the final optimized poses by `rtabmap-export --opt 2`.
+  Its final trajectory gives every frame with valid odometry a pose,
+  `T_opt(node) T_odom(node)^-1 T_odom(frame)` with the latest earlier final-graph node; its online
+  trajectory is RTAB-Map's map correction times odometry at that frame, and `coordinate_session`
+  changes when the optimized graph's root node changes (new or joined maps).
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

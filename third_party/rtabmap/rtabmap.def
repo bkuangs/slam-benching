@@ -1,0 +1,64 @@
+Bootstrap: docker
+# introlab3it/rtabmap:jammy-deps (Ubuntu 22.04 + ROS 2 Humble dependencies: OpenCV 4.5 contrib/nonfree,
+# PCL, GTSAM, g2o, OctoMap, libpointmatcher, OpenGV). The tag is rebuilt upstream, so pin the amd64 digest.
+From: introlab3it/rtabmap@sha256:791e9a1ca8b94e0b80a9f3293bd5c87dbc6ce38050ca4d6d6584e9e8e100243f
+
+# RTAB-Map pinned build for slam-benching.
+# Build with third_party/rtabmap/build_container.sh (wraps `apptainer build --fakeroot`).
+# Versions resolved inside the image are written to /opt/slambench/versions.txt.
+
+%files
+    slambench_rtabmap_driver.cc /opt/slambench/src/slambench_rtabmap_driver.cc
+    CMakeLists.driver.txt /opt/slambench/src/CMakeLists.txt
+
+%environment
+    export LD_LIBRARY_PATH=/usr/local/lib:/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}
+    export PATH=/usr/local/bin:${PATH}
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    RTABMAP_COMMIT=d069becc724905d6465a8758c40dae88e13bb9e8   # tag 0.23.8
+    BASE_DIGEST=sha256:791e9a1ca8b94e0b80a9f3293bd5c87dbc6ce38050ca4d6d6584e9e8e100243f
+    JOBS=${SLAMBENCH_BUILD_JOBS:-8}
+    set +u
+    . /opt/ros/humble/setup.sh
+    set -u
+
+    command -v git >/dev/null || { apt-get update && apt-get install -y --no-install-recommends git ca-certificates; }
+    mkdir -p /opt/src && cd /opt/src
+    git clone https://github.com/introlab/rtabmap.git
+    cd rtabmap && git checkout ${RTABMAP_COMMIT}
+    mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_APP=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=ON \
+        -DWITH_QT=OFF -DWITH_OCTOMAP=ON -DWITH_OPENGV=ON 2>&1 | tee /opt/slambench_cmake.log
+    make -j${JOBS} && make install && ldconfig
+
+    cd /opt/slambench/src && mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release && make -j${JOBS}
+    mkdir -p /opt/slambench/bin && cp rtabmap_driver /opt/slambench/bin/
+    /opt/slambench/bin/rtabmap_driver --print-capabilities > /opt/slambench/capabilities.txt
+
+    {
+      echo "rtabmap_commit=$(git -C /opt/src/rtabmap rev-parse HEAD)"
+      echo "rtabmap_version=$(grep -m1 'rtabmap_version=' /opt/slambench/capabilities.txt | cut -d= -f2)"
+      echo "rtabmap_local_changes=$(git -C /opt/src/rtabmap diff --stat | tail -1)"
+      echo "driver_source_sha1=$(cat /opt/slambench/src/slambench_rtabmap_driver.cc | sha1sum | cut -c1-40)"
+      echo "base_image=introlab3it/rtabmap@${BASE_DIGEST}"
+      grep -v '^rtabmap_version=' /opt/slambench/capabilities.txt
+      echo "opencv=$(pkg-config --modversion opencv4 2>/dev/null || echo unknown)"
+      echo "pcl=$(pkg-config --modversion pcl_common-1.12 2>/dev/null || ls /usr/include | grep -m1 pcl- || echo unknown)"
+      echo "gcc=$(gcc -dumpfullversion)"
+      echo "ros_distro=${ROS_DISTRO:-none}"
+      echo "base_os=$(. /etc/os-release && echo $PRETTY_NAME)"
+    } > /opt/slambench/versions.txt
+    cat /opt/slambench/versions.txt
+    rm -rf /opt/src/rtabmap/build
+
+%runscript
+    exec /opt/slambench/bin/rtabmap_driver "$@"
+
+%test
+    test -x /opt/slambench/bin/rtabmap_driver
+    command -v rtabmap-export
+    cat /opt/slambench/versions.txt

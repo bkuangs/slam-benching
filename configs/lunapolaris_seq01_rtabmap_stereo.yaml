@@ -1,0 +1,37 @@
+# RTAB-Map stereo (its own stereo odometry + graph SLAM) on LunaPolaris sequence_01.
+# Same input and evaluation as lunapolaris_seq01_orbslam3_stereo.yaml for a direct comparison.
+# Besides trajectories it writes a reusable localization map (rtabmap.db), a dense cloud and a
+# 3D OctoMap (occupied / free / unknown); see docs/adapter_interface.md.
+name: lunapolaris_seq01_rtabmap_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_01
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose
+
+algorithm:
+  name: rtabmap
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/rtabmap_0.23.8.sif
+  settings:
+    detection_rate_hz: 1.0
+    loop_closure: true
+    grid_cell_size: 0.05
+    grid_range_max: 5.0
+    playback_rate: 1.0
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

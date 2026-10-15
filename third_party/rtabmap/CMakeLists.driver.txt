@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.14)
+project(slambench_rtabmap_driver CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=x86-64")
+
+find_package(RTABMap REQUIRED COMPONENTS core)
+find_package(OpenCV REQUIRED)
+
+add_executable(rtabmap_driver slambench_rtabmap_driver.cc)
+target_link_libraries(rtabmap_driver rtabmap::core ${OpenCV_LIBS})
