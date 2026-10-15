@@ -61,6 +61,10 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "image_format": "png_bgr",        # lossless; alpha channel (bgra8) dropped
     "imu_noise": None,                # dict(ImuNoise fields) with source + verified
     "zenodo_calibration_json": None,  # optional path; cross-check only
+    # Vertical shift (px, bilinear) applied to every right image at preparation; negative moves the
+    # content up. Corrects a constant left/right row misalignment of the recorded "rectified" images
+    # that camera_info does not describe (sequence_11: -1.63 px; see docs/datasets/lunapolaris.md).
+    "right_row_shift_px": 0.0,
 }
 
 
@@ -87,7 +91,7 @@ def _decode_image(msg) -> np.ndarray:
 class LunaPolarisAdapter(DatasetAdapter):
     name = "lunapolaris"
     adapter_version = "1"
-    input_affecting_options = ("left_topic", "right_topic", "imu_topic", "image_format")
+    input_affecting_options = ("left_topic", "right_topic", "imu_topic", "image_format", "right_row_shift_px")
 
     def __init__(self, root, sequence, options=None):
         merged = dict(DEFAULT_OPTIONS)
@@ -96,6 +100,12 @@ class LunaPolarisAdapter(DatasetAdapter):
         if self.options["calibration_source"] != "bag_camera_info":
             raise ValueError("lunapolaris: only calibration_source='bag_camera_info' is valid for the "
                              "recorded rectified images (the Zenodo JSON uses a different rectification)")
+
+    def preparation_inputs(self, mode: SensorMode) -> Dict[str, Any]:
+        out = super().preparation_inputs(mode)
+        if not float(self.options["right_row_shift_px"] or 0.0):
+            out["options"].pop("right_row_shift_px", None)   # keeps cache keys of unshifted inputs
+        return out
 
     # ---- bag access ------------------------------------------------------
     @property
@@ -344,7 +354,13 @@ class LunaPolarisAdapter(DatasetAdapter):
         stats = {"left_msgs": 0, "right_msgs": 0, "duplicate_stamps": 0, "non_opaque_alpha_frames": 0,
                  "encodings": set(), "sizes": set(), "bag_minus_header_ns": []}
 
-        def save(path, img):
+        shift = float(self.options["right_row_shift_px"] or 0.0)
+        M_shift = np.float32([[1, 0, 0], [0, 1, shift]])
+
+        def save(path, img, shift_rows=False):
+            if shift_rows:
+                img = cv2.warpAffine(img, M_shift, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_REPLICATE)
             if not cv2.imwrite(str(path), img):
                 raise IOError(f"failed to write {path}")
 
@@ -368,7 +384,7 @@ class LunaPolarisAdapter(DatasetAdapter):
                     stats["duplicate_stamps"] += 1
                     continue
                 rel = f"{side}/{ts}.png"
-                futures.append(pool.submit(save, out_dir / rel, img.copy()))
+                futures.append(pool.submit(save, out_dir / rel, img.copy(), side == "cam1" and shift != 0.0))
                 while len(futures) > 64:  # bound memory held by queued images
                     futures.popleft().result()
                 slot[side] = rel
@@ -419,7 +435,8 @@ class LunaPolarisAdapter(DatasetAdapter):
             if len(lag) else None,
             "frame_dt_s": {"median": float(np.nanmedian(frame_dt)), "max": float(np.nanmax(frame_dt))},
             "images": "lossless PNG; bgra8 -> bgr8 by dropping the alpha channel (no other processing)",
-            "preprocessing": [],
+            "preprocessing": ([f"right images shifted vertically by {shift} px (bilinear, border replicated) "
+                               "to correct a constant left/right row misalignment"] if shift else []),
             **imu_stats,
         }
         return PreparedInput(out_dir, mode, n, n_imu, manifest)

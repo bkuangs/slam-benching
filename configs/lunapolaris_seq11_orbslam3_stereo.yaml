@@ -9,6 +9,7 @@ dataset:
   sequence: sequence_11
   options:
     gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose   # consistent with /tf_static (see docs)
+    right_row_shift_px: -1.63   # seq11 right images sit 1.63 px low (scripts/measure_stereo_row_offset.py)
 
 algorithm:
   name: orbslam3

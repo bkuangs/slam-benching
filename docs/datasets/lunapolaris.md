@@ -68,5 +68,15 @@ after the bag starts; max inter-message gaps (bag time) are 2 s for images and 3
 
 ## Conversion to the slambench offline format (`prepare_offline`)
 * PNG, lossless; bgra8 → bgr8 by dropping alpha (alpha opacity is checked and counted).
-* No resizing, colour conversion, equalisation or undistortion. `preprocessing: []` in manifest.
+* No resizing, colour conversion, equalisation or undistortion. `preprocessing: []` in manifest,
+  except for the optional row shift below.
+* **sequence_11 stereo row misalignment.** Its "rectified" images are not row-aligned: features in the
+  right image sit a constant 1.65 px lower than in the left (fit dy = y_left − y_right = −1.647 px,
+  x/y-dependent terms < 0.2 px over the image; sequence_01: −0.13 px). Its camera_info has identical
+  left/right P rows, so the offset is undocumented. Same-row stereo matchers (RTAB-Map block
+  matching) then find almost no depth and odometry is lost from the start; ORB-SLAM3 tolerates it.
+  `dataset.options.right_row_shift_px` (px, negative = up; default 0) shifts every right image by a
+  bilinear warp at preparation, is part of the cache key, and is recorded in the manifest
+  `preprocessing`. The seq11 configs set −1.63. Measure other sequences with
+  `scripts/measure_stereo_row_offset.py <prepared_stereo_dir>` and use the printed constant term.
 * Cached under `<work_dir>/prepared/lunapolaris/<sequence>/<mode>_<key>/`.
