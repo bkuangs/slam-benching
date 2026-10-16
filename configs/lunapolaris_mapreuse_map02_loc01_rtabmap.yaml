@@ -1,0 +1,45 @@
+# Map reuse: RTAB-Map localizes LunaPolaris sequence_01 against the map saved by a sequence_02
+# mapping run (a copy of its rtabmap.db, loaded in this fresh process). Map: ceiling light, craters + small rocks.
+# Query: ceiling light, craters only (only the layout changes).
+# Poses are scored in the saved map's fixed frame using the mapping run's map->GT transform
+# (evaluation section map_reuse, docs/evaluation.md); settings must equal the mapping run's.
+name: lunapolaris_mapreuse_map02_loc01_rtabmap
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_01
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose
+
+algorithm:
+  name: rtabmap
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/rtabmap_0.23.8.sif
+  settings:
+    map_run: /home/hice1/bkuang7/scratch/slam-bench-work/runs/lunapolaris_seq02_rtabmap_stereo/20261016-092125_9f9388
+    detection_rate_hz: 1.0
+    loop_closure: true
+    stereo_optical_flow: false
+    grid_cell_size: 0.05
+    grid_range_max: 5.0
+    playback_rate: 1.0
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3          # the standard (aligned) accuracy is reported too; map_reuse is the fixed-frame score
+  association_max_dt_s: 0.02
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}
+  map_reuse:
+    error_thresholds_m: [0.1, 0.25, 0.5]
+    false_relocalization_m: 0.5
+    false_relocalization_deg: 15.0
+    staleness_s: [1.0, 5.0]

@@ -20,7 +20,7 @@ declare -A RECORDS=(
 REC="${RECORDS[$SEQ]:?unknown sequence $SEQ}"
 SCRIPTS="$(cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}" && pwd)/scripts"
 mkdir -p "$DEST" && cd "$DEST"
-curl -fsSL "https://zenodo.org/api/records/$REC" -o .zenodo_record.json
+curl -fsSL --connect-timeout 30 --max-time 120 --retry 30 --retry-delay 60 --retry-all-errors "https://zenodo.org/api/records/$REC" -o .zenodo_record.json
 python3 - <<'PY' > .files.tsv
 import json
 for f in json.load(open(".zenodo_record.json"))["files"]:
