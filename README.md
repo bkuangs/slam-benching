@@ -20,6 +20,7 @@ slambench/
               tumvi.py                TUM-VI (EuRoC/ASL export) adapter, used for installation checks
               subtmrs.py              SubT-MRS folder release (SmokeRoom; MEI -> virtual pinhole, mono only)
   viz/        rerun_export.py         run directory -> Rerun replay (.rrd)
+              map_reuse_export.py     replay of a localization run in the saved map's fixed frame
   algorithms/ base.py                 AlgorithmAdapter interface + normalized diagnostics columns
               orbslam3.py             ORB-SLAM3 via Apptainer image
               rtabmap.py              RTAB-Map 0.23.8 (stereo) via Apptainer image; also exports maps
@@ -109,6 +110,12 @@ Run a mapping config (e.g. `configs/lunapolaris_seq01_rtabmap_stereo.yaml`), put
 into a `configs/lunapolaris_mapreuse_*` config as `algorithm.settings.map_run`, then run that config:
 it localizes another sequence against a copy of the saved map in a fresh process and scores it in
 the map's fixed frame (`map_reuse` in `eval/metrics.json`; see docs/evaluation.md).
+`slambench view <localization run>` writes a map-reuse replay instead of the aligned one: the saved
+map (mapping run's dense cloud and node path), the query's ground truth and its localized poses
+coloured by fixed-frame error, all placed with the mapping run's map->GT transform (nothing fitted on
+the query run); accepted localizations with a line to the matched map node, rejected hypotheses, the
+query camera next to the map image it should recognize (the matched node, else the map node nearest
+its true pose and viewing direction), and fixed-frame error / localized state over time.
 
 ### Experiment config
 ```yaml

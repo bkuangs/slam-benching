@@ -79,7 +79,12 @@ def _cmd_view(args) -> int:
     except ImportError as exc:  # pragma: no cover
         print(f"viewer needs the rerun SDK: pip install -e '.[viz]' ({exc})")
         return 2
-    rep = export_run(Path(args.run_dir), Path(args.output) if args.output else None, stride=args.stride,
+    run_dir = Path(args.run_dir)
+    out = json.loads((run_dir / "algorithm_output.json").read_text()) \
+        if (run_dir / "algorithm_output.json").exists() else {}
+    if (out.get("extra") or {}).get("map_reuse"):
+        from .viz.map_reuse_export import export_map_reuse as export_run  # fixed map frame, not aligned
+    rep = export_run(run_dir, Path(args.output) if args.output else None, stride=args.stride,
                      jpeg_quality=args.jpeg_quality, max_width=args.max_width, images=not args.no_images)
     print(json.dumps(rep, indent=2, default=str))
     print(f"open locally with: pip install rerun-sdk=={rep['rerun_version']} && rerun {Path(rep['out']).name}")
