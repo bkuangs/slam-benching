@@ -22,6 +22,8 @@ dependencies = [
 test = ["pytest>=7"]
 # Replay viewer export; the desktop viewer that opens the .rrd must be the same version.
 viz = ["rerun-sdk==0.26.2"]
+# scripts/dense_from_keyframes.py (dense TSDF mesh from ORB-SLAM3 keyframes)
+dense = ["open3d>=0.17"]
 
 [project.scripts]
 slambench = "slambench.cli:main"
