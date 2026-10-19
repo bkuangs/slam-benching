@@ -87,8 +87,21 @@ def _kill_group(proc: subprocess.Popen) -> Optional[int]:
     return proc.poll()
 
 
+def _mid_run_cpu_cores(samples: List[Tuple[float, float]], lo: float = 0.25, hi: float = 0.75
+                       ) -> Optional[float]:
+    """Average CPU cores used between lo and hi of the run's wall time, from (wall_s, cpu_s) samples
+    of the process tree; excludes startup (e.g. vocabulary/map loading) and post-processing."""
+    if len(samples) < 3:
+        return None
+    t_end = samples[-1][0]
+    win = [(t, c) for t, c in samples if lo * t_end <= t <= hi * t_end]
+    if len(win) < 2 or win[-1][0] <= win[0][0]:
+        return None
+    return (win[-1][1] - win[0][1]) / (win[-1][0] - win[0][0])
+
+
 def execute(cmd: List[str], cwd: Path, stdout_path: Path, stderr_path: Path, timeout_s: float,
-            poll_s: float) -> Dict[str, Any]:
+            poll_s: float, samples_path: Optional[Path] = None) -> Dict[str, Any]:
     """Run `cmd`, sampling the RSS of the whole process tree; kill the group on timeout.
 
     Memory monitoring is best effort: if it cannot attach (e.g. the process already exited) or
@@ -99,6 +112,7 @@ def execute(cmd: List[str], cwd: Path, stdout_path: Path, stderr_path: Path, tim
     t0 = time.monotonic()
     started = dt.datetime.now().isoformat(timespec="seconds")
     peak, samples, timed_out = 0, 0, False
+    cpu_series: List[Tuple[float, float, float]] = []  # (wall_s, cpu_s of live tree, rss_mb)
     monitor_errors: List[str] = []
     try:
         import psutil
@@ -122,14 +136,17 @@ def execute(cmd: List[str], cwd: Path, stdout_path: Path, stderr_path: Path, tim
                     pass
                 if root is not None:
                     try:
-                        rss = 0
+                        rss, cpu = 0, 0.0
                         for p in [root] + root.children(recursive=True):
                             try:
                                 rss += p.memory_info().rss
+                                ct = p.cpu_times()
+                                cpu += ct.user + ct.system
                             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                                 pass
                         peak = max(peak, rss)
                         samples += 1
+                        cpu_series.append((time.monotonic() - t0, cpu, rss / 2 ** 20))
                     except psutil.NoSuchProcess:
                         pass
                     except Exception as exc:  # noqa: BLE001 - stop monitoring, keep the run
@@ -151,7 +168,17 @@ def execute(cmd: List[str], cwd: Path, stdout_path: Path, stderr_path: Path, tim
            "max_single_process_rss_mb_rusage": after.ru_maxrss / 1024,
            "cpu_user_s": after.ru_utime - before.ru_utime,
            "cpu_system_s": after.ru_stime - before.ru_stime,
-           "memory_monitor": {"samples": samples, "errors": monitor_errors}}
+           "memory_monitor": {"samples": samples, "errors": monitor_errors},
+           "cpu_cores_mid_run": _mid_run_cpu_cores([(t, c) for t, c, _ in cpu_series]),
+           "cpu_cores_mid_run_method": "CPU time (user+system) of the live process tree over the middle "
+                                       "50% of wall time / that wall time; excludes startup and export"}
+    if samples_path is not None and cpu_series:
+        try:
+            with open(samples_path, "w") as f:
+                f.write("wall_s,cpu_s,rss_mb\n")
+                f.writelines(f"{t:.3f},{c:.3f},{m:.1f}\n" for t, c, m in cpu_series)
+        except OSError as exc:
+            monitor_errors.append(f"could not write {samples_path}: {exc}")
     if not samples:
         res["peak_rss_unavailable_reason"] = (
             "; ".join(monitor_errors) or "estimator exited before the first memory sample")
@@ -333,7 +360,8 @@ def _run_stages(cfg, evaluate, log, run_dir, status, stage, finish) -> Path:
     log(f"[slambench] executing: {shlex.join(cmd)}")
     try:
         res = execute(cmd, run_dir, run_dir / "stdout.log", run_dir / "stderr.log",
-                      float(ex["timeout_s"]), float(ex["memory_poll_s"]))
+                      float(ex["timeout_s"]), float(ex["memory_poll_s"]),
+                      samples_path=run_dir / "resource_samples.csv")
     except Exception as exc:  # noqa: BLE001 - e.g. executable not found: estimator never ran
         return finish(RunStatus.HARNESS_ERROR, f"could not execute estimator: {type(exc).__name__}: {exc}",
                       exc=exc)

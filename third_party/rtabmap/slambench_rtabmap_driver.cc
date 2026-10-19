@@ -9,6 +9,7 @@
 //   rtabmap_driver <params.txt> <input_dir> <output_dir>
 //                  --camera fx,fy,cx,cy,baseline,width,height
 //                  [--detection-rate HZ] [--playback-rate R] [--log-features] [--localize]
+//                  [--threaded-map-update]
 //   rtabmap_driver --print-capabilities
 //
 //   params.txt         one RTAB-Map parameter per line, "Group/Name=value" ('#' comments).
@@ -22,6 +23,12 @@
 //                      is never saved back) and params.txt must set Mem/IncrementalMemory=false.
 //                      RTAB-Map localizes against the map instead of extending it; nodes.csv and
 //                      links.csv are not written, map_loaded_nodes.csv lists the loaded map.
+//   --threaded-map-update  run map updates (Rtabmap::process) on a worker thread, as the separate
+//                      odometry and rtabmap nodes of rtabmap_ros do, instead of after the frame's
+//                      odometry on the same thread. Odometry never waits for a map update; the
+//                      online pose uses the latest finished update's map correction; an update
+//                      request still waiting when the next is due is dropped (latest wins).
+//                      track_time_s is then the odometry time only.
 //
 // Input (input_dir):
 //   frames.csv : timestamp_ns,left_path,right_path   (rectified stereo pair)
@@ -49,6 +56,7 @@
 //                       status 0 = not matched to the odometry local map, 1 = inlier, 2 = matched
 //                       but rejected by the motion estimate.
 //   driver_status.json  exit status written by the driver itself.
+//   driver_timing.json  frame-loop wall/CPU time, odometry vs map-update CPU, dropped updates.
 //
 // Poses are written for the left camera optical frame (cam0): RTAB-Map's base frame pose times
 // the camera local transform (the default optical rotation, so RTAB-Map's base frame is x-forward,
@@ -86,6 +94,12 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <sys/resource.h>
+#include <time.h>
 #include <vector>
 
 using namespace std;
@@ -181,6 +195,18 @@ void WritePose(ostream &o, const Transform &T) {
       << q.x() << "," << q.y() << "," << q.z() << "," << q.w();
 }
 
+double ThreadCpuSeconds() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+double ProcessCpuSeconds() {
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+}
+
 int GraphRoot(const map<int, Transform> &poses) {
     for (const auto &kv : poses) if (kv.first > 0) return kv.first;  // ids ascend; <=0 are landmarks
     return 0;
@@ -194,6 +220,7 @@ void PrintCapabilities() {
     cout << "optimizer_gtsam=" << rtabmap::Optimizer::isAvailable(rtabmap::Optimizer::kTypeGTSAM) << "\n";
     cout << "optimizer_toro=" << rtabmap::Optimizer::isAvailable(rtabmap::Optimizer::kTypeTORO) << "\n";
     cout << "grid_3d_default=" << d.at(rtabmap::Parameters::kGrid3D()) << "\n";
+    cout << "threaded_map_update=1\n";
 }
 
 }  // namespace
@@ -205,13 +232,14 @@ int main(int argc, char **argv) {
     }
     if (argc < 4) {
         cerr << "Usage: rtabmap_driver <params.txt> <input_dir> <output_dir> --camera fx,fy,cx,cy,b,w,h"
-                " [--detection-rate HZ] [--playback-rate R] [--log-features] [--localize]" << endl;
+                " [--detection-rate HZ] [--playback-rate R] [--log-features] [--localize]"
+                " [--threaded-map-update]" << endl;
         return 2;
     }
     const string params_path = argv[1], input_dir = argv[2], output_dir = argv[3];
     const string status_path = output_dir + "/driver_status.json";
     double playback_rate = 0.0, detection_rate = 1.0;
-    bool log_features = false, localize = false;
+    bool log_features = false, localize = false, threaded = false;
     vector<double> cam;
     for (int i = 4; i < argc; ++i) {
         string a = argv[i];
@@ -219,6 +247,7 @@ int main(int argc, char **argv) {
         else if (a == "--detection-rate" && i + 1 < argc) detection_rate = atof(argv[++i]);
         else if (a == "--log-features") log_features = true;
         else if (a == "--localize") localize = true;
+        else if (a == "--threaded-map-update") threaded = true;
         else if (a == "--camera" && i + 1 < argc) {
             for (const auto &c : Split(argv[++i], ',')) cam.push_back(atof(c.c_str()));
         } else {
@@ -308,13 +337,180 @@ int main(int argc, char **argv) {
         feat.write("SBFEAT01", 8);
     }
 
+    // Map-update side. In --threaded-map-update mode it runs on a worker thread (as the separate
+    // odometry and rtabmap nodes of rtabmap_ros); `snap` is the map state the frame loop sees.
+    struct UpdateResult {
+        bool added = false, loc_event = false, loc_rejected = false;
+        int loop_id = 0, prox_id = 0;
+        double slam_s = 0.0, loc_corr = 0.0;
+    };
+    struct Snapshot {
+        Transform correction;
+        int last_node = 0, map_id = -1, wm_size = 0;
+        long coord_session = 0;
+        bool localized = false;
+    };
     vector<NodeRecord> nodes;
+    size_t n_updates = 0, n_loc_events = 0, n_dropped = 0;
+    int root = 0;
+    double map_thread_cpu_s = 0.0, odom_thread_cpu_s = 0.0;
+    std::mutex mu;
+    Snapshot snap;
+    snap.correction = slam.getMapCorrection();
+    snap.wm_size = slam.getWMSize();
+
+    auto do_update = [&](rtabmap::SensorData &data, const Transform &odom_base, const cv::Mat &cov,
+                         long long t_ns) {
+        UpdateResult r;
+        const double c0 = ThreadCpuSeconds();
+        const auto s0 = chrono::steady_clock::now();
+        slam.process(data, odom_base, cov);
+        r.slam_s = chrono::duration<double>(chrono::steady_clock::now() - s0).count();
+        map_thread_cpu_s += ThreadCpuSeconds() - c0;
+        ++n_updates;
+        Snapshot ns = snap;  // only this function writes snap, so reading it here needs no lock
+        // Each update creates a signature, but RTAB-Map deletes it again when the robot moved
+        // less than RGBD/LinearUpdate / AngularUpdate; only signatures still in memory are nodes.
+        const int id = slam.getLastLocationId();
+        if (!localize && id > 0 && id != ns.last_node && slam.getMemory() && slam.getMemory()->getSignature(id)) {
+            r.added = true;
+            ns.last_node = id;
+            const int map_id = slam.getMemory() ? slam.getMemory()->getMapId(id) : -1;
+            nodes.push_back({id, map_id, t_ns, odom_base * optical});
+        }
+        if (!localize) {
+            const int gr = GraphRoot(slam.getLocalOptimizedPoses());
+            if (gr != 0 && root != 0 && gr != root) ++ns.coord_session;
+            if (gr != 0) root = gr;
+        }
+        const rtabmap::Statistics &su = slam.getStatistics();
+        r.loop_id = su.loopClosureId();
+        r.prox_id = su.proximityDetectionId();
+        r.loc_event = r.loop_id > 0 || r.prox_id > 0;
+        const auto &sd = su.data();
+        const auto rj = sd.find(rtabmap::Statistics::kLoopRejectedHypothesis());
+        r.loc_rejected = rj != sd.end() && rj->second > 0.0f;
+        const auto cn = sd.find(rtabmap::Statistics::kLoopOdom_correction_norm());
+        if (r.loc_event && cn != sd.end()) r.loc_corr = cn->second;
+        if (r.loc_event) {
+            ns.localized = true;
+            ++n_loc_events;
+        }
+        ns.correction = slam.getMapCorrection();
+        ns.map_id = (ns.last_node > 0 && slam.getMemory()) ? slam.getMemory()->getMapId(ns.last_node) : -1;
+        ns.wm_size = slam.getWMSize();
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            snap = ns;
+        }
+        return r;
+    };
+
+    struct Request {
+        size_t i = 0;
+        long long t_ns = 0;
+        rtabmap::SensorData data;
+        Transform odom;
+        cv::Mat cov;
+    };
+    std::condition_variable cv_req;
+    std::unique_ptr<Request> pending;
+    bool stop = false;
+    map<size_t, UpdateResult> done;  // finished updates by frame index, until their row is written
+    set<size_t> dropped;             // update requests replaced while the worker was busy
+    std::thread worker;
+    if (threaded) {
+        worker = std::thread([&] {
+            for (;;) {
+                std::unique_ptr<Request> req;
+                {
+                    std::unique_lock<std::mutex> lk(mu);
+                    cv_req.wait(lk, [&] { return pending || stop; });
+                    if (!pending) return;
+                    req = std::move(pending);
+                }
+                const UpdateResult r = do_update(req->data, req->odom, req->cov, req->t_ns);
+                std::lock_guard<std::mutex> lk(mu);
+                done[req->i] = r;
+            }
+        });
+    }
+    auto finish_worker = [&] {
+        if (!worker.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            stop = true;
+        }
+        cv_req.notify_all();
+        worker.join();  // the worker first finishes the pending request
+    };
+    struct Finally {
+        std::function<void()> f;
+        ~Finally() { f(); }
+    } join_on_exit{finish_worker};
+
+    struct Row {
+        size_t i;
+        long long t_ns;
+        bool odom_ok, kf_added, requested;
+        int features, inliers, matches, local_map_size;
+        Snapshot s;
+        double odom_s;
+        Transform odom_base;
+    };
+    std::deque<Row> rows;
+    auto write_row = [&](const Row &r, const UpdateResult *u) {
+        log << r.i << "," << r.t_ns << "," << (r.odom_ok ? 1 : 0) << "," << r.features << ","
+            << r.inliers << "," << r.matches << "," << r.local_map_size << ","
+            << (r.kf_added ? 1 : 0) << "," << (u ? 1 : 0) << "," << (u && u->added ? 1 : 0) << ","
+            << r.s.last_node << "," << r.s.map_id << "," << (u ? u->loop_id : 0) << ","
+            << (u ? u->prox_id : 0) << "," << r.s.wm_size << ","
+            << setprecision(6) << r.odom_s << "," << (u ? u->slam_s : 0.0) << ","
+            << r.odom_s + (u && !threaded ? u->slam_s : 0.0) << "," << r.s.coord_session << ",";
+        if (r.odom_ok) {
+            WritePose(log, r.s.correction * r.odom_base * optical);
+            log << ",";
+            WritePose(log, r.odom_base * optical);
+        } else {
+            log << ",,,,,,,,,,,,,";
+        }
+        log << "," << (r.s.localized || (u && u->loc_event) ? 1 : 0) << "," << (u && u->loc_event ? 1 : 0)
+            << "," << (u && u->loc_rejected ? 1 : 0) << "," << setprecision(6) << (u ? u->loc_corr : 0.0)
+            << "\n";
+    };
+    // Rows are written in frame order once their map update (if any) has finished or was dropped.
+    auto flush_rows = [&](bool all) {
+        while (!rows.empty()) {
+            const Row &r = rows.front();
+            UpdateResult u;
+            bool has_u = false;
+            if (r.requested) {
+                std::lock_guard<std::mutex> lk(mu);
+                const auto it = done.find(r.i);
+                if (it != done.end()) {
+                    u = it->second;
+                    has_u = true;
+                    done.erase(it);
+                } else if (!dropped.erase(r.i) && !all) {
+                    break;
+                }
+            }
+            write_row(r, has_u ? &u : nullptr);
+            rows.pop_front();
+        }
+        log.flush();
+    };
+    auto fail = [&](const string &status, const string &msg, size_t fed) {
+        finish_worker();
+        flush_rows(true);
+        WriteStatus(status_path, status, msg, frames.size(), fed, n_updates, nodes.size());
+    };
+
     const auto wall_start = chrono::steady_clock::now();
-    size_t fed = 0, n_updates = 0, n_loc_events = 0;
+    const double loop_cpu0 = ProcessCpuSeconds();
+    size_t fed = 0;
     long long last_update_ns = 0;
-    bool any_update = false, localized = false;
-    int last_node = 0, root = 0;
-    long coord_session = 0;
+    bool any_update = false;
     cv::Mat pending_cov;
     const long long update_period_ns = detection_rate > 0 ? static_cast<long long>(1e9 / detection_rate) : 0;
 
@@ -324,9 +520,7 @@ int main(int argc, char **argv) {
         cv::Mat im_r = cv::imread(input_dir + "/" + fr.right, cv::IMREAD_UNCHANGED);
         if (im_l.empty() || im_r.empty()) {
             cerr << "Failed to load image(s) for frame " << i << endl;
-            log.flush();
-            WriteStatus(status_path, "input_error", "failed to load image for frame " + to_string(i),
-                        frames.size(), fed, n_updates, nodes.size());
+            fail("input_error", "failed to load image for frame " + to_string(i), fed);
             return 3;
         }
         if (im_l.channels() == 4) cv::cvtColor(im_l, im_l, cv::COLOR_BGRA2BGR);
@@ -334,18 +528,18 @@ int main(int argc, char **argv) {
         if (im_r.channels() == 4) cv::cvtColor(im_r, im_r, cv::COLOR_BGRA2GRAY);
         else if (im_r.channels() == 3) cv::cvtColor(im_r, im_r, cv::COLOR_BGR2GRAY);
         if (im_l.depth() != CV_8U || im_r.depth() != CV_8U) {
-            log.flush();
-            WriteStatus(status_path, "input_error", "frame " + to_string(i) + ": images must be 8-bit",
-                        frames.size(), fed, n_updates, nodes.size());
+            fail("input_error", "frame " + to_string(i) + ": images must be 8-bit", fed);
             return 3;
         }
 
         const double stamp = fr.t_ns * 1e-9;
         rtabmap::SensorData data(im_l, im_r, model, static_cast<int>(i) + 1, stamp);
         rtabmap::OdometryInfo info;
+        const double oc0 = ThreadCpuSeconds();
         const auto t0 = chrono::steady_clock::now();
         const Transform odom_base = odom->process(data, &info);
         const auto t1 = chrono::steady_clock::now();
+        odom_thread_cpu_s += ThreadCpuSeconds() - oc0;
         const bool odom_ok = !odom_base.isNull();
         ++fed;
 
@@ -357,66 +551,40 @@ int main(int argc, char **argv) {
                 (pending_cov.empty() || c00 > pending_cov.at<double>(0, 0)))
                 pending_cov = info.reg.covariance.clone();
         }
-        bool updated = false, added = false, loc_event = false, loc_rejected = false;
-        double slam_s = 0.0, loc_corr = 0.0;
+        bool requested = false;
         if (odom_ok && (!any_update || update_period_ns == 0 || fr.t_ns - last_update_ns >= update_period_ns)) {
             cv::Mat cov = pending_cov.empty() ? cv::Mat::eye(6, 6, CV_64FC1) : pending_cov;
             pending_cov = cv::Mat();
-            const auto s0 = chrono::steady_clock::now();
-            slam.process(data, odom_base, cov);
-            slam_s = chrono::duration<double>(chrono::steady_clock::now() - s0).count();
-            updated = true;
+            requested = true;
             any_update = true;
             last_update_ns = fr.t_ns;
-            ++n_updates;
-            // Each update creates a signature, but RTAB-Map deletes it again when the robot moved
-            // less than RGBD/LinearUpdate / AngularUpdate; only signatures still in memory are nodes.
-            const int id = slam.getLastLocationId();
-            if (!localize && id > 0 && id != last_node && slam.getMemory() && slam.getMemory()->getSignature(id)) {
-                added = true;
-                last_node = id;
-                const int map_id = slam.getMemory() ? slam.getMemory()->getMapId(id) : -1;
-                nodes.push_back({id, map_id, fr.t_ns, odom_base * optical});
-            }
-            if (!localize) {
-                const int r = GraphRoot(slam.getLocalOptimizedPoses());
-                if (r != 0 && root != 0 && r != root) ++coord_session;
-                if (r != 0) root = r;
-            }
-            const rtabmap::Statistics &su = slam.getStatistics();
-            loc_event = su.loopClosureId() > 0 || su.proximityDetectionId() > 0;
-            const auto &sd = su.data();
-            const auto rj = sd.find(rtabmap::Statistics::kLoopRejectedHypothesis());
-            loc_rejected = rj != sd.end() && rj->second > 0.0f;
-            const auto cn = sd.find(rtabmap::Statistics::kLoopOdom_correction_norm());
-            if (loc_event && cn != sd.end()) loc_corr = cn->second;
-            if (loc_event) {
-                localized = true;
-                ++n_loc_events;
+            if (threaded) {
+                // Latest wins (as RtabmapThread with a one-element buffer): a request still waiting
+                // when the next one is due is dropped; its covariance is kept if it was larger.
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (pending) {
+                        const double old_c = pending->cov.at<double>(0, 0), new_c = cov.at<double>(0, 0);
+                        if (old_c != 1.0 && (new_c == 1.0 || old_c > new_c)) cov = pending->cov;
+                        dropped.insert(pending->i);
+                        ++n_dropped;
+                    }
+                    pending.reset(new Request{i, fr.t_ns, data, odom_base, cov});
+                }
+                cv_req.notify_one();
+            } else {
+                done[i] = do_update(data, odom_base, cov, fr.t_ns);
             }
         }
-        const double odom_s = chrono::duration<double>(t1 - t0).count();
-
-        const rtabmap::Statistics &st = slam.getStatistics();
-        const int map_id = (last_node > 0 && slam.getMemory()) ? slam.getMemory()->getMapId(last_node) : -1;
-        log << i << "," << fr.t_ns << "," << (odom_ok ? 1 : 0) << "," << info.features << ","
-            << info.reg.inliers << "," << info.reg.matches << "," << info.localMapSize << ","
-            << (info.keyFrameAdded ? 1 : 0) << "," << (updated ? 1 : 0) << "," << (added ? 1 : 0) << ","
-            << last_node << "," << map_id << "," << (updated ? st.loopClosureId() : 0) << ","
-            << (updated ? st.proximityDetectionId() : 0) << "," << slam.getWMSize() << ","
-            << setprecision(6) << odom_s << "," << slam_s << "," << odom_s + slam_s << ","
-            << coord_session << ",";
-        if (odom_ok) {
-            WritePose(log, slam.getMapCorrection() * odom_base * optical);
-            log << ",";
-            WritePose(log, odom_base * optical);
-        } else {
-            log << ",,,,,,,,,,,,,";
+        Snapshot s;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            s = snap;
         }
-        log << "," << (localized ? 1 : 0) << "," << (loc_event ? 1 : 0) << "," << (loc_rejected ? 1 : 0) << ","
-            << setprecision(6) << loc_corr;
-        log << "\n";
-        log.flush();
+        rows.push_back({i, fr.t_ns, odom_ok, info.keyFrameAdded, requested, info.features, info.reg.inliers,
+                        info.reg.matches, info.localMapSize, s, chrono::duration<double>(t1 - t0).count(),
+                        odom_base});
+        flush_rows(false);
 
         if (log_features) {
             const set<int> inl(info.reg.inliersIDs.begin(), info.reg.inliersIDs.end());
@@ -428,9 +596,9 @@ int main(int argc, char **argv) {
             feat.write(reinterpret_cast<const char *>(&n), 4);
             for (const auto &w : info.words) {
                 const float xy[2] = {w.second.pt.x, w.second.pt.y};
-                const uint8_t s = inl.count(w.first) ? 1 : (mat.count(w.first) ? 2 : 0);
+                const uint8_t st = inl.count(w.first) ? 1 : (mat.count(w.first) ? 2 : 0);
                 feat.write(reinterpret_cast<const char *>(xy), 8);
-                feat.write(reinterpret_cast<const char *>(&s), 1);
+                feat.write(reinterpret_cast<const char *>(&st), 1);
             }
             if (i % 50 == 0) feat.flush();
         }
@@ -440,6 +608,23 @@ int main(int argc, char **argv) {
             const double elapsed = chrono::duration<double>(chrono::steady_clock::now() - wall_start).count();
             if (target > elapsed) this_thread::sleep_for(chrono::duration<double>(target - elapsed));
         }
+    }
+    finish_worker();
+    flush_rows(true);
+    {
+        const double loop_wall = chrono::duration<double>(chrono::steady_clock::now() - wall_start).count();
+        ofstream f(output_dir + "/driver_timing.json");
+        f << "{\n  \"threaded_map_update\": " << (threaded ? "true" : "false")
+          << ",\n  \"n_update_requests\": " << n_updates + n_dropped
+          << ",\n  \"n_update_requests_dropped\": " << n_dropped
+          << ",\n  \"loop_wall_s\": " << loop_wall
+          << ",\n  \"loop_process_cpu_s\": " << ProcessCpuSeconds() - loop_cpu0
+          << ",\n  \"odometry_call_cpu_s\": " << odom_thread_cpu_s
+          << ",\n  \"map_update_call_cpu_s\": " << map_thread_cpu_s
+          << ",\n  \"note\": \"loop_process_cpu_s = user+system CPU of the whole driver process during the "
+             "frame loop (all threads, excludes startup/map load and saving); the *_call_cpu_s are the "
+             "CPU times of the calling thread inside odometry->process() and Rtabmap::process() only "
+             "(library-internal worker threads are not included)\"\n}\n";
     }
     if (log_features) feat.close();
     if (localize) {

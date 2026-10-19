@@ -186,3 +186,19 @@ def test_lidar_modes_rejected_until_adapter_supports_them(tmp_path):
     assert any("lacks streams ['lidar']" in p for p in probs)
     ds.sequence_info = lambda: type("I", (), {"streams": {"lidar": 1, "imu": 1}})()
     assert any("LiDAR modes deferred" in p for p in ds.validate(SensorMode.LIDAR_INERTIAL))
+
+
+def test_mid_run_cpu_cores_excludes_startup_and_tail():
+    # 2 cores during the middle of the run, a 10 s single-core startup burst and a final export burst
+    samples = [(t, (10.0 if t >= 10 else t) + 2.0 * max(0.0, min(t, 90) - 10) + (5.0 if t >= 95 else 0.0))
+               for t in np.arange(0.0, 100.5, 0.5)]
+    assert runner._mid_run_cpu_cores(samples) == pytest.approx(2.0)
+    assert runner._mid_run_cpu_cores(samples[:2]) is None
+
+
+def test_execute_writes_resource_samples(tmp_path):
+    res = runner.execute(["python3", "-c", "import time; t=time.time()\nwhile time.time()-t<1.5: pass"],
+                         tmp_path, tmp_path / "o", tmp_path / "e", 30, 0.1, samples_path=tmp_path / "s.csv")
+    lines = (tmp_path / "s.csv").read_text().splitlines()
+    assert lines[0] == "wall_s,cpu_s,rss_mb" and len(lines) > 5
+    assert 0.2 < res["cpu_cores_mid_run"] < 1.3  # one busy thread (less on a loaded machine)

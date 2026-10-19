@@ -58,6 +58,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "stereo_optical_flow": False,
     "kp_max_features": 500,        # Kp/MaxFeatures (bag-of-words loop-closure detection)
     "loop_closure": True,          # False -> Kp/MaxFeatures=-1 and no proximity detection
+    # Map updates on a worker thread (as rtabmap_ros' separate odometry and rtabmap nodes) instead
+    # of after each frame's odometry: per-frame time is then odometry only; the online pose uses the
+    # latest finished update; an update still queued when the next is due is dropped.
+    "threaded_map_update": False,
+    # False -> no per-node local occupancy grids (RGBD/CreateOccupancyGrid=false, Grid/* unset): the
+    # map keeps images/features for localization and the dense cloud export, but no OctoMap.
+    "occupancy_grid": True,
     "grid_cell_size": 0.05,        # Grid/CellSize (m), local grids and OctoMap resolution
     "grid_range_max": 5.0,         # Grid/RangeMax (m) of stereo points used for the grids
     "grid_ray_tracing": True,      # Grid/RayTracing: mark free space between camera and obstacles
@@ -174,6 +181,8 @@ class RtabmapAdapter(AlgorithmAdapter):
         d = out["cloud_decimation"]
         if isinstance(d, bool) or int(d) != d or int(d) < 1:
             raise ValueError(f"cloud_decimation must be an integer >= 1, got {d}")
+        if out["export_octomap"] and not out["occupancy_grid"]:
+            raise ValueError("export_octomap needs occupancy_grid: true (the OctoMap is built from local grids)")
         if out["map_run"] is not None:
             out["map_run"] = str(Path(out["map_run"]).expanduser().resolve())
         return out
@@ -304,14 +313,17 @@ class RtabmapAdapter(AlgorithmAdapter):
             "Kp/MaxFeatures": int(s["kp_max_features"]) if s["loop_closure"] else -1,
             "Mem/IncrementalMemory": True,
             "Mem/BinDataKept": True,               # keep images in the DB (reusable map, dense export)
-            "RGBD/CreateOccupancyGrid": True,      # per-node local grids, needed for the OctoMap
-            "Grid/Sensor": 1,                      # from stereo depth
-            "Grid/3D": True,
-            "Grid/RayTracing": bool(s["grid_ray_tracing"]),
-            "Grid/GroundIsObstacle": bool(s["grid_ground_is_obstacle"]),
-            "Grid/CellSize": float(s["grid_cell_size"]),
-            "Grid/RangeMax": float(s["grid_range_max"]),
+            "RGBD/CreateOccupancyGrid": bool(s["occupancy_grid"]),  # per-node local grids (OctoMap)
         }
+        if s["occupancy_grid"]:
+            p.update({
+                "Grid/Sensor": 1,                  # from stereo depth
+                "Grid/3D": True,
+                "Grid/RayTracing": bool(s["grid_ray_tracing"]),
+                "Grid/GroundIsObstacle": bool(s["grid_ground_is_obstacle"]),
+                "Grid/CellSize": float(s["grid_cell_size"]),
+                "Grid/RangeMax": float(s["grid_range_max"]),
+            })
         if not s["loop_closure"]:
             p["RGBD/ProximityBySpace"] = False
         if self.localizing(s):
@@ -358,6 +370,8 @@ class RtabmapAdapter(AlgorithmAdapter):
             args.append("--log-features")
         if self.localizing(s):
             args.append("--localize")
+        if s["threaded_map_update"]:
+            args.append("--threaded-map-update")
         return args
 
     def export_args(self, ctx: RunContext) -> Optional[List[str]]:
@@ -586,6 +600,11 @@ class RtabmapAdapter(AlgorithmAdapter):
             except json.JSONDecodeError as exc:
                 extra["driver_status_unreadable"] = str(exc)
         extra["driver_status"] = driver_status
+        if (d / "driver_timing.json").exists():
+            try:
+                extra["driver_timing"] = json.loads((d / "driver_timing.json").read_text())
+            except ValueError as exc:
+                extra["driver_timing_unreadable"] = str(exc)
         if self.localizing(ctx.settings):
             return self._collect_localization(ctx, returncode, timed_out, frames_ts, extra, driver_status)
 
@@ -602,8 +621,11 @@ class RtabmapAdapter(AlgorithmAdapter):
             otraj = Trajectory(np.array([r["timestamp_ns"] for r in online], dtype=np.int64), P[:, :3], P[:, 3:],
                                frame="cam0",
                                meta={"source": str(d / "frame_log.csv"), "estimator": "RTAB-Map",
-                                     "content": "map correction x odometry right after each frame "
-                                                "(frames with valid odometry); left camera frame"})
+                                     "content": ("map correction of the latest finished map update x odometry "
+                                                 "(map updates on a worker thread)"
+                                                 if ctx.settings["threaded_map_update"] else
+                                                 "map correction x odometry right after each frame")
+                                                + " (frames with valid odometry); left camera frame"})
             online_path = ctx.run_dir / "trajectory_online.tum"
             write_tum(otraj, online_path)
             trajectories.append(TrajectoryOutput(

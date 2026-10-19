@@ -91,9 +91,15 @@ as completion.
 
 ## Compute cost (`timing`)
 * `wall_time_s` of the estimator process, `peak_rss_mb` (sum of RSS over the process tree,
-  sampled; method string recorded), CPU user/system time.
+  sampled; method string recorded), CPU user/system time (`getrusage` of the whole process tree,
+  so it includes startup such as vocabulary loading and any post-run map export).
+* `cpu_cores_mid_run`: average CPU cores in use over the middle 50% of wall time, from the
+  process tree's CPU time sampled every `memory_poll_s` (`resource_samples.csv` in the run
+  directory: wall_s, cpu_s, rss_mb). It excludes startup and post-processing, so with real-time
+  playback it is the steady-state compute load.
 * `per_frame_time_s`: wall time of each tracking call (tracking thread only; mapping and loop
-  closing run concurrently in ORB-SLAM3).
+  closing run concurrently in ORB-SLAM3). For RTAB-Map it also includes the map update on update
+  frames unless `threaded_map_update: true`.
 * `realtime`: fraction of frames whose tracking time exceeds the recorded frame period, and whether
   the p95 fits within it. With `playback_rate: 1.0` the input is throttled to real time, so wall
   time ≈ sequence duration and is *not* a throughput number; `tracking_throughput_fps`

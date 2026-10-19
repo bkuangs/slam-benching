@@ -1,0 +1,43 @@
+# Compute cost of RTAB-Map's dense mapping on LunaPolaris sequence_02: identical to
+# lunapolaris_seq02_rtabmap_stereo_lean.yaml (threaded map updates, no feature logging) but with
+# per-node occupancy grids and the dense cloud / OctoMap export on, so the difference between the
+# two is the cost of the dense map. See docs/results/compute_comparison.md.
+name: lunapolaris_seq02_rtabmap_stereo_dense
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_02
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose
+
+algorithm:
+  name: rtabmap
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/rtabmap_0.23.8.sif
+  settings:
+    detection_rate_hz: 1.0
+    loop_closure: true
+    stereo_optical_flow: false   # default KLT stereo matching caused ~30 deg/m pitch drift on seq01
+    playback_rate: 1.0
+    threaded_map_update: true    # map updates on a worker thread (as rtabmap_ros); per-frame time = odometry
+    occupancy_grid: true
+    grid_cell_size: 0.05
+    grid_range_max: 5.0
+    export_cloud: true
+    export_octomap: true
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

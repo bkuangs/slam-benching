@@ -22,7 +22,8 @@ TAIL_COLUMNS = [
     "coverage_source", "frame_coverage", "time_coverage", "time_to_first_ok_s",
     "n_loss_events", "n_unrecovered", "recovery_mean_s", "recovery_max_s", "n_maps",
     "final_trajectory_frame_coverage",
-    "wall_time_s", "peak_rss_mb", "cpu_user_s", "per_frame_time_mean_s", "per_frame_time_p95_s",
+    "wall_time_s", "peak_rss_mb", "cpu_user_s", "cpu_system_s", "cpu_cores_mid_run",
+    "per_frame_time_mean_s", "per_frame_time_p95_s",
     "frac_frames_over_period", "run_dir", "config_source",
 ]
 #: Static columns; RPE columns ("<kind>_rpe_<delta><unit>_...") are added per configured interval.
@@ -135,7 +136,8 @@ def run_row(run_dir: Path) -> Dict[str, Any]:
         "n_maps": _get(cov, "n_maps"),
         "final_trajectory_frame_coverage": _get(cov, "final_trajectory_frame_coverage"),
         "wall_time_s": st.get("wall_time_s", ""), "peak_rss_mb": st.get("peak_rss_mb", ""),
-        "cpu_user_s": st.get("cpu_user_s", ""),
+        "cpu_user_s": st.get("cpu_user_s", ""), "cpu_system_s": st.get("cpu_system_s", ""),
+        "cpu_cores_mid_run": st.get("cpu_cores_mid_run", ""),
         "per_frame_time_mean_s": _get(tim, "per_frame_time_s", "mean"),
         "per_frame_time_p95_s": _get(tim, "per_frame_time_s", "p95"),
         "frac_frames_over_period": _get(tim, "realtime", "fraction_frames_over_period"),

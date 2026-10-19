@@ -1,0 +1,39 @@
+# Compute-cost comparison of ORB-SLAM3 vs RTAB-Map stereo on LunaPolaris sequence_01: same input and
+# evaluation as lunapolaris_seq01_orbslam3_stereo.yaml, with work the other estimator does not do
+# switched off (RTAB-Map: occupancy grids and map export; both: per-frame feature logging) and
+# RTAB-Map's map updates on their own thread, as ORB-SLAM3's mapping and loop closing are.
+# See docs/results/compute_comparison.md.
+name: lunapolaris_seq01_orbslam3_stereo_lean
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work      # prepared (converted) inputs are cached under work_dir/prepared
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris               # contains sequence_01/{metadata.yaml,sequence_01.db3}
+  sequence: sequence_01
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose   # consistent with /tf_static (see docs)
+
+algorithm:
+  name: orbslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif
+  settings:
+    orb_n_features: 1200
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3                 # metric stereo -> rigid alignment
+  association_max_dt_s: 0.02     # mocap ~30 Hz (33 ms period); nearest sample within 20 ms
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

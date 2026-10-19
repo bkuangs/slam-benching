@@ -97,6 +97,15 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   changes when the optimized graph's root node changes (new or joined maps). The adapter sets
   `Stereo/OpticalFlow=false` by default (setting `stereo_optical_flow`): with RTAB-Map's default KLT
   stereo correspondences, LunaPolaris odometry absorbed forward motion as ~30°/m of pitch drift.
+  By default the driver runs each map update (`Rtabmap::process`, 1 Hz on data time) right after
+  that frame's odometry on the same thread, so `track_time_s` includes it. With
+  `threaded_map_update: true` (driver `--threaded-map-update`) map updates run on a worker thread,
+  as rtabmap_ros' separate odometry and rtabmap nodes do: `track_time_s` is odometry only, the
+  online pose uses the latest *finished* update's map correction, and an update request still
+  queued when the next is due is dropped (latest wins). `occupancy_grid: false` skips the per-node
+  local grids (no OctoMap). `algorithm/driver_timing.json` (`extra.driver_timing`) records the
+  frame loop's wall and process CPU time, the CPU spent inside odometry vs map-update calls, and the
+  number of dropped update requests.
   **Map reuse** (setting `map_run: <mapping run dir>`): the run copies that run's `rtabmap.db`,
   checks that all RTAB-Map parameters equal the mapping run's except `Mem/IncrementalMemory=false`
   and `Mem/InitWMWithAllNodes=true`, and the driver (`--localize`) localizes against the map in a

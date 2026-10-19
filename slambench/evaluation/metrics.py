@@ -559,6 +559,7 @@ def timing_metrics(diag: Optional[FrameDiagnostics], input_ts: np.ndarray, run_s
         "peak_rss_method": run_status.get("peak_rss_method"),
         "cpu_user_s": run_status.get("cpu_user_s"),
         "cpu_system_s": run_status.get("cpu_system_s"),
+        "cpu_cores_mid_run": run_status.get("cpu_cores_mid_run"),
         "playback_rate": playback_rate,
         "playback": ("throttled to recorded rate x %.3g" % playback_rate) if playback_rate
         else "unthrottled (as fast as possible)",

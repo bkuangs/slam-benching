@@ -71,7 +71,8 @@ def test_registered_and_rejects_non_stereo_and_bad_settings(tmp_path):
     assert any("container not found" in p for p in a.validate(SensorMode.STEREO, ds, s))
     for bad in ({"nope": 1}, {"extra_parameters": {"Odom/ResetCountdown": 1}},
                 {"extra_parameters": {"Grid/CellSize": 0.1}}, {"extra_parameters": {"NoSlash": 1}},
-                {"cloud_decimation": 0}, {"grid_cell_size": 0}, {"detection_rate_hz": -1}):
+                {"cloud_decimation": 0}, {"grid_cell_size": 0}, {"detection_rate_hz": -1},
+                {"occupancy_grid": False}):  # the OctoMap export (on by default) needs the grids
         with pytest.raises(ValueError):
             a.resolve_settings(bad)
 
@@ -95,6 +96,18 @@ def test_parameters_command_and_export(tmp_path):
     assert "Kp/MaxFeatures=-1" in [f"{k}={v}" for k, v in a.parameters(ctx.settings).items()]
     assert a.parameters(ctx.settings)["RGBD/ProximityBySpace"] == "false"
     assert "rtabmap-export" not in a.command(ctx)[-1]
+    assert "--threaded-map-update" not in a.command(ctx)[-1]
+
+
+def test_threaded_map_update_and_no_occupancy_grid(tmp_path):
+    a, ds, ctx = _ctx(tmp_path, {"threaded_map_update": True, "occupancy_grid": False,
+                                 "export_octomap": False})
+    p = a.parameters(ctx.settings)
+    assert p["RGBD/CreateOccupancyGrid"] == "false"
+    assert not any(k.startswith("Grid/") for k in p)
+    script = a.command(ctx)[-1]
+    assert "--threaded-map-update" in script
+    assert "rtabmap-export" in script and "--cloud" in script and "--octomap" not in script
 
 
 def test_collect_final_trajectory_reanchors_odometry_on_graph(tmp_path):
