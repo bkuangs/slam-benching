@@ -26,7 +26,8 @@ Constructor: `(root: Path, sequence: str, options: dict)`; `options` comes from 
 | `stereo_calibration() -> StereoCalibration \| None` | calibration that matches the images handed to the estimator (`rectified` flag, model, `T_left_right`, baseline, provenance string). Single-camera datasets set `right=None` (mono modes only). |
 | `imu_calibration() -> ImuCalibration \| None` | `T_cam0_imu`, rate, `ImuNoise` (with `source` and `verified`), time offset (`None` = unknown). A non-zero offset is rejected by `validate()` because slambench does not apply offsets to inputs yet. |
 | `ground_truth() -> GroundTruth \| None` | poses of `body_frame` in `reference_frame`, integer-ns stamps, `quaternions_xyzw=None` for position-only GT. Never written into estimator inputs. |
-| `T_gt_body_sensor(frame) -> 4x4 \| None` | pose of logical sensor frame (`cam0`, `imu`) in the GT body frame; `None` if unknown (accuracy is then reported as unavailable). |
+| `T_gt_body_sensor(frame) -> 4x4 \| None` | pose of logical sensor frame (`cam0`, `imu`, `lidar`) in the GT body frame; `None` if unknown (accuracy is then reported as unavailable). |
+| `lidar_calibration() -> dict` (optional, LiDAR datasets with `supports_lidar = True`) | `T_imu_lidar` (LiDAR pose in the frame of the IMU written to `imu.csv`), `imu_source`, `time_offset_s` (`None` = unknown), `source`; copied into `dataset_info.json` for LiDAR modes. |
 | `validate(mode) -> [str]` | human-readable reasons the mode cannot run (missing streams, calibration, unverified IMU noise). Base class implements the generic checks. |
 | `prepare_offline(mode, out_dir) -> PreparedInput` | write the offline format (below) with original timestamps; record every conversion in the manifest; `preprocessing: []` unless explicitly enabled. |
 | `provenance() -> dict` | paths, sizes, checksums… stored in `dataset_info.json`. |
@@ -44,6 +45,12 @@ preparation_inputs`, so a different or updated copy of a sequence never reuses s
 <dir>/imu.csv        timestamp_ns,wx,wy,wz,ax,ay,az         (rad/s, m/s^2; inertial modes)
 <dir>/manifest.json  provenance, counts, dropped samples, conversions, preprocessing list
 ```
+LiDAR modes use the same files; `frames.csv` then lists one scan per row, `timestamp_ns` = scan end
+(latest point), `left_path` = `lidar/<ns>.bin`, `right_path` empty. A scan file is little endian:
+8-byte magic `SBLIDAR1`, int64 `start_ns`, uint32 point count, uint32 record size (20), then per point
+`f32 x,y,z, u32 offset_ns (from start_ns), u8 reflectivity, tag, line, reserved` (sensor frame, all
+points in sensor order; `slambench/datasets/lunapolaris.py: write_lidar_scan / read_lidar_scan`).
+
 Direct bag replay is also allowed: an algorithm adapter may ignore the offline format and consume
 `dataset.root/sequence` itself (declare this in the adapter); the dataset adapter still provides
 calibration and GT.
@@ -57,7 +64,7 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
 | `name`, `supported_modes` | registry name, set of `SensorMode`. |
 | `resolve_settings(settings)` | fill defaults, reject unknown keys; result is saved in `config.resolved.yaml`. |
 | `validate(mode, dataset, settings) -> [str]` | unsupported mode, missing installation, unsupported camera model… |
-| `estimate_frame(mode) -> str` | logical frame of output poses (`cam0`, `imu`). |
+| `estimate_frame(mode) -> str` | logical frame of output poses (`cam0`, `imu`, `lidar`). |
 | `version_info() -> dict` | pinned commit, image digest, library versions; raise if the installed version differs from the pin. |
 | `prepare(ctx)` | write native config into `ctx.algo_dir` from dataset calibration + settings. |
 | `command(ctx) -> [str]` | exact argv (saved to `command.txt`). |

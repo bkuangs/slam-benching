@@ -1,0 +1,96 @@
+Bootstrap: docker
+# ros:noetic-perception-focal (Ubuntu 20.04, ROS 1 Noetic, PCL 1.10, pcl_ros). The tag is rebuilt
+# upstream, so pin the amd64 digest.
+From: ros@sha256:ef5fdebeaa881604208c067f96d42b61331825309e559c093e24e9e89c7d3d2e
+
+# FAST-LIO2 pinned build for slam-benching.
+# Build with third_party/fastlio/build_container.sh (wraps `apptainer build --fakeroot`).
+# Versions resolved inside the image are written to /opt/slambench/versions.txt.
+
+%files
+    slambench_offline.hpp /opt/slambench/src/slambench_offline.hpp
+    patches /opt/slambench/patches
+
+%environment
+    export ROS_DISTRO=noetic
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    FASTLIO_COMMIT=7cc4175de6f8ba2edf34bab02a42195b141027e9      # hku-mars/FAST_LIO main, 2024-07-23
+    IKDTREE_COMMIT=e2e3f4e9d3b95a9e66b1ba83dc98d4a05ed8a3c4      # FAST_LIO's include/ikd-Tree submodule
+    LIVOX_DRIVER_COMMIT=3d240d5666129e1a3052e78ee8487a04b08fdda3 # Livox-SDK/livox_ros_driver master
+    BASE_DIGEST=sha256:ef5fdebeaa881604208c067f96d42b61331825309e559c093e24e9e89c7d3d2e
+    JOBS=${SLAMBENCH_BUILD_JOBS:-8}
+
+    apt-get update
+    apt-get install -y --no-install-recommends git ca-certificates libpython3-dev
+    rm -rf /var/lib/apt/lists/*
+
+    mkdir -p /opt/catkin_ws/src /opt/src
+    # livox_ros_driver message definitions only (CustomMsg / CustomPoint), so the Livox SDK is not needed.
+    git clone https://github.com/Livox-SDK/livox_ros_driver.git /opt/src/livox_ros_driver
+    git -C /opt/src/livox_ros_driver checkout ${LIVOX_DRIVER_COMMIT}
+    mkdir -p /opt/catkin_ws/src/livox_ros_driver/msg
+    cp /opt/src/livox_ros_driver/livox_ros_driver/msg/CustomMsg.msg /opt/src/livox_ros_driver/livox_ros_driver/msg/CustomPoint.msg \
+       /opt/catkin_ws/src/livox_ros_driver/msg/
+    cat > /opt/catkin_ws/src/livox_ros_driver/CMakeLists.txt <<'EOF'
+cmake_minimum_required(VERSION 3.0.2)
+project(livox_ros_driver)
+find_package(catkin REQUIRED COMPONENTS message_generation std_msgs)
+add_message_files(FILES CustomPoint.msg CustomMsg.msg)
+generate_messages(DEPENDENCIES std_msgs)
+catkin_package(CATKIN_DEPENDS message_runtime std_msgs)
+EOF
+    cat > /opt/catkin_ws/src/livox_ros_driver/package.xml <<'EOF'
+<?xml version="1.0"?>
+<package format="2">
+  <name>livox_ros_driver</name>
+  <version>2.0.0</version>
+  <description>livox_ros_driver message definitions only (slam-benching)</description>
+  <maintainer email="none@example.com">slam-benching</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>message_generation</build_depend>
+  <depend>std_msgs</depend>
+  <exec_depend>message_runtime</exec_depend>
+</package>
+EOF
+
+    git clone https://github.com/hku-mars/FAST_LIO.git /opt/catkin_ws/src/FAST_LIO
+    cd /opt/catkin_ws/src/FAST_LIO
+    git checkout ${FASTLIO_COMMIT}
+    git submodule update --init --recursive
+    test "$(git -C include/ikd-Tree rev-parse HEAD)" = "${IKDTREE_COMMIT}"
+    for p in /opt/slambench/patches/*.patch; do git apply "$p"; done
+    cp /opt/slambench/src/slambench_offline.hpp src/
+
+    cd /opt/catkin_ws
+    set +u
+    . /opt/ros/noetic/setup.sh
+    catkin_make -DCMAKE_BUILD_TYPE=Release -j${JOBS} 2>&1 | tee /opt/slambench/catkin_make.log
+    set -u
+    test -x /opt/catkin_ws/devel/lib/fast_lio/fastlio_mapping
+
+    {
+      echo "fastlio_commit=$(git -C /opt/catkin_ws/src/FAST_LIO rev-parse HEAD)"
+      echo "ikdtree_commit=$(git -C /opt/catkin_ws/src/FAST_LIO/include/ikd-Tree rev-parse HEAD)"
+      echo "livox_ros_driver_commit=$(git -C /opt/src/livox_ros_driver rev-parse HEAD)"
+      echo "fastlio_local_changes=$(git -C /opt/catkin_ws/src/FAST_LIO diff --stat | tail -1)"
+      echo "driver_source_sha1=$(cat /opt/slambench/src/slambench_offline.hpp $(LC_ALL=C ls /opt/slambench/patches/*.patch) | sha1sum | cut -c1-40)"
+      echo "mp_proc_num=$(grep -m1 'core for MP' /opt/slambench/catkin_make.log | sed 's/.*: *//' || echo 1)"
+      echo "base_image=ros@${BASE_DIGEST} (ros:noetic-perception-focal)"
+      echo "pcl=$(dpkg-query -W -f='${Version}' libpcl-dev 2>/dev/null || echo unknown)"
+      echo "eigen=$(dpkg-query -W -f='${Version}' libeigen3-dev 2>/dev/null || echo unknown)"
+      echo "roscpp=$(dpkg-query -W -f='${Version}' ros-noetic-roscpp 2>/dev/null || echo unknown)"
+      echo "gcc=$(gcc -dumpfullversion)"
+      echo "ros_distro=noetic"
+      echo "base_os=$(. /etc/os-release && echo $PRETTY_NAME)"
+    } > /opt/slambench/versions.txt
+    cat /opt/slambench/versions.txt
+    rm -rf /opt/catkin_ws/build
+
+%test
+    test -x /opt/catkin_ws/devel/lib/fast_lio/fastlio_mapping
+    test -x /opt/ros/noetic/bin/rosmaster
+    cat /opt/slambench/versions.txt

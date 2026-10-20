@@ -328,6 +328,8 @@ def _run_stages(cfg, evaluate, log, run_dir, status, stage, finish) -> Path:
         if mode.is_inertial:
             imu = dataset.imu_calibration()
             info["imu_calibration"] = imu.to_dict() if imu else None
+        if "lidar" in mode.value and hasattr(dataset, "lidar_calibration"):
+            info["lidar_calibration"] = dataset.lidar_calibration()
         if hasattr(dataset, "zenodo_crosscheck"):
             info["calibration_crosscheck"] = dataset.zenodo_crosscheck()
         _write_json(run_dir / "dataset_info.json", info)

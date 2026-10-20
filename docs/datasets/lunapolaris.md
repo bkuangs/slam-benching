@@ -80,3 +80,24 @@ after the bag starts; max inter-message gaps (bag time) are 2 s for images and 3
   `preprocessing`. The seq11 configs set −1.63. Measure other sequences with
   `scripts/measure_stereo_row_offset.py <prepared_stereo_dir>` and use the printed constant term.
 * Cached under `<work_dir>/prepared/lunapolaris/<sequence>/<mode>_<key>/`.
+
+## LiDAR / LiDAR-inertial conversion (`lidar`, `lidar_inertial` modes)
+* Livox HAP `/leo01/livox/lidar` (livox_ros_driver2 PointCloud2: x,y,z f32, intensity f32 (integer
+  valued), tag, line u8, timestamp f64 ns; 6 lines, ~45k points, ~100 ms per scan, ranges ~1.6–10 m
+  indoors). The header stamp equals the first point's stamp; points are nearly time-ordered (a few
+  hundred small backward steps per scan) and the last point is always the latest.
+* One `lidar/<end ns>.bin` per message with every point in message order (zero/no-return points kept;
+  the estimator filters). `start_ns = min(header, earliest point)`, `offset_ns = point − start_ns`,
+  frame timestamp = latest point (FAST-LIO's scan end time). Intensity is stored as uint8
+  reflectivity (checked integer in [0, 255]). Note the f64 per-point stamps quantize to 256 ns.
+* IMU (`lidar_inertial`): `lidar_imu_source: zed2` (default) writes the ZED2 IMU
+  (`imu_topic`, ~80–100 Hz, m/s²); `livox` writes `/leo01/livox/imu` × 9.80665 (g → m/s²). The
+  Livox IMU is decimated in these bags (median 20 ms, ~3,100 gaps > 0.1 s per sequence, up to 0.9 s),
+  which breaks IMU propagation, hence the ZED2 default.
+* `lidar_calibration()`: for `zed2`, `T_imu_lidar = T_body_imu⁻¹ · T_body_lidar` from /tf_static
+  (marker → livox_frame, nominal URDF) and the ZED `left_cam_imu_transform`; the LiDAR is pitched
+  ~27° relative to the IMU. No LiDAR–IMU time offset is published; gyro-norm cross-correlation
+  (Livox vs ZED IMU) gives −10 ms (sequence_01) and +25 ms (sequence_11), not applied.
+* `T_gt_body_sensor("lidar")` = /tf_static marker → `lidar_frame`, so trajectories in the `lidar`
+  frame are evaluated against the same mocap ground truth.
+* Camera options do not enter the LiDAR cache key and vice versa. ~8 GB per sequence.

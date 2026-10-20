@@ -1,0 +1,36 @@
+# FAST-LIO2 (LiDAR-inertial odometry, no loop closure) on LunaPolaris sequence_02: Livox HAP scans +
+# ZED2 IMU (the Livox IMU is too decimated in these bags; see docs/datasets/lunapolaris.md).
+# Same evaluation block as the ORB-SLAM3 / RTAB-Map stereo configs; poses are LiDAR-frame poses and
+# the evaluator maps ground truth to the LiDAR frame via /tf_static. Writes fastlio_map.ply (2 cm
+# voxel map) for scripts/eval_map_quality.py --lio.
+name: lunapolaris_seq02_fastlio_lidar_inertial
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_02
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose
+    lidar_imu_source: zed2
+
+algorithm:
+  name: fastlio
+  mode: lidar_inertial
+  options:
+    container: ~/scratch/slam-bench-work/containers/fastlio_7cc4175.sif
+  settings:
+    playback_rate: 1.0
+    map_voxel: 0.02
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

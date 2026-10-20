@@ -24,7 +24,13 @@ Every fact below was verified on sequence_01 (see docs/datasets/lunapolaris.md):
   cyclic axis permutation (Y-up) of it whose body axes do *not* match the tf tree.
   Marker->left optical frame comes from /tf_static (nominal URDF values; the chain
   is internally consistent with optitrack_marker_link to <0.5 mm).
-* LiDAR: Livox ``/leo01/livox/lidar`` (PointCloud2) + ``/leo01/livox/imu``.
+* LiDAR: Livox HAP ``/leo01/livox/lidar`` (PointCloud2, frame leo01/livox_frame, 10 Hz, ~45k
+  points, 6 lines; per-point absolute ``timestamp`` (f64 ns), header stamp = first point) +
+  ``/leo01/livox/imu`` (acceleration in g). The Livox IMU is heavily decimated in the bags (median
+  20 ms, but ~3,100 gaps > 0.1 s per sequence, up to 0.9 s), so LiDAR-inertial inputs use the ZED2
+  IMU by default (``lidar_imu_source: zed2``; ~80 Hz, LiDAR->IMU extrinsic from /tf_static and the
+  left_cam_imu_transform). Gyro-norm cross-correlation puts the Livox/ZED clock offset within
+  about +-25 ms (not applied).
 """
 
 from __future__ import annotations
@@ -54,6 +60,9 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "cam_imu_topic": "/leo01/zed2/left_cam_imu_transform",
     "lidar_topic": "/leo01/livox/lidar",
     "lidar_imu_topic": "/leo01/livox/imu",
+    "lidar_frame": "leo01/livox_frame",
+    # IMU used for LiDAR-inertial inputs: "zed2" (imu_topic) or "livox" (lidar_imu_topic, g -> m/s^2)
+    "lidar_imu_source": "zed2",
     "gt_topic": "/vrpn_mocap/ZED2_camera_marker/rectified/pose",
     "gt_body_frame": "vrpn_mocap/ZED2_camera_marker",
     "cam0_frame": "zed2_left_camera_optical_frame",
@@ -66,6 +75,59 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     # that camera_info does not describe (sequence_11: -1.63 px; see docs/datasets/lunapolaris.md).
     "right_row_shift_px": 0.0,
 }
+
+
+LIVOX_G = 9.80665   # Livox IMUs report acceleration in g
+
+_CAMERA_OPTIONS = ("left_topic", "right_topic", "image_format", "right_row_shift_px")
+_LIDAR_OPTIONS = ("lidar_topic", "lidar_imu_source", "lidar_imu_topic")
+
+#: slambench LiDAR scan file (one per frame, ``lidar/<scan end ns>.bin``), little endian:
+#: 8-byte magic, int64 start_ns, uint32 n_points, uint32 record size, then n_points records.
+LIDAR_SCAN_MAGIC = b"SBLIDAR1"
+LIDAR_SCAN_HEADER = np.dtype([("magic", "S8"), ("start_ns", "<i8"), ("n_points", "<u4"), ("record_size", "<u4")])
+LIDAR_POINT_DTYPE = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("offset_ns", "<u4"),
+                              ("reflectivity", "u1"), ("tag", "u1"), ("line", "u1"), ("reserved", "u1")])
+
+
+def write_lidar_scan(path: Path, start_ns: int, points: np.ndarray) -> None:
+    """Write one scan; `points` is a LIDAR_POINT_DTYPE array (offset_ns relative to start_ns)."""
+    hdr = np.array([(LIDAR_SCAN_MAGIC, int(start_ns), len(points), LIDAR_POINT_DTYPE.itemsize)],
+                   dtype=LIDAR_SCAN_HEADER)
+    with open(path, "wb") as f:
+        f.write(hdr.tobytes())
+        f.write(np.ascontiguousarray(points, dtype=LIDAR_POINT_DTYPE).tobytes())
+
+
+def read_lidar_scan(path: Path):
+    """(start_ns, LIDAR_POINT_DTYPE array) of a scan written by write_lidar_scan."""
+    raw = Path(path).read_bytes()
+    hdr = np.frombuffer(raw, LIDAR_SCAN_HEADER, count=1)[0]
+    if hdr["magic"] != LIDAR_SCAN_MAGIC or hdr["record_size"] != LIDAR_POINT_DTYPE.itemsize:
+        raise ValueError(f"{path}: not a slambench LiDAR scan")
+    pts = np.frombuffer(raw, LIDAR_POINT_DTYPE, count=int(hdr["n_points"]), offset=LIDAR_SCAN_HEADER.itemsize)
+    return int(hdr["start_ns"]), pts
+
+
+def livox_points(msg):
+    """Livox PointCloud2 (livox_ros_driver2 layout) -> (absolute point stamps ns, LIDAR_POINT_DTYPE
+    array with offset_ns unset), points in message order."""
+    off = {f.name: f.offset for f in msg.fields}
+    missing = {"x", "y", "z", "intensity", "tag", "line", "timestamp"} - set(off)
+    if missing:
+        raise ValueError(f"LiDAR message lacks fields {sorted(missing)}")
+    dt = np.dtype({"names": ["x", "y", "z", "i", "tag", "line", "t"],
+                   "formats": ["<f4", "<f4", "<f4", "<f4", "u1", "u1", "<f8"],
+                   "offsets": [off[k] for k in ("x", "y", "z", "intensity", "tag", "line", "timestamp")],
+                   "itemsize": int(msg.point_step)})
+    a = np.frombuffer(bytes(msg.data), dt, count=int(msg.width) * int(msg.height))
+    out = np.zeros(len(a), LIDAR_POINT_DTYPE)
+    for k in ("x", "y", "z", "tag", "line"):
+        out[k] = a[k]
+    if len(a) and (a["i"].min() < 0 or a["i"].max() > 255 or np.any(a["i"] != np.round(a["i"]))):
+        raise ValueError("Livox intensity is not an integer reflectivity in [0, 255]")
+    out["reflectivity"] = a["i"].astype(np.uint8)
+    return a["t"].astype(np.int64), out
 
 
 def _stamp_ns(header) -> int:
@@ -91,7 +153,9 @@ def _decode_image(msg) -> np.ndarray:
 class LunaPolarisAdapter(DatasetAdapter):
     name = "lunapolaris"
     adapter_version = "1"
-    input_affecting_options = ("left_topic", "right_topic", "imu_topic", "image_format", "right_row_shift_px")
+    supports_lidar = True
+    input_affecting_options = ("left_topic", "right_topic", "imu_topic", "image_format", "right_row_shift_px",
+                               *_LIDAR_OPTIONS)
 
     def __init__(self, root, sequence, options=None):
         merged = dict(DEFAULT_OPTIONS)
@@ -100,11 +164,21 @@ class LunaPolarisAdapter(DatasetAdapter):
         if self.options["calibration_source"] != "bag_camera_info":
             raise ValueError("lunapolaris: only calibration_source='bag_camera_info' is valid for the "
                              "recorded rectified images (the Zenodo JSON uses a different rectification)")
+        if self.options["lidar_imu_source"] not in ("zed2", "livox"):
+            raise ValueError("lunapolaris: lidar_imu_source must be 'zed2' or 'livox'")
 
     def preparation_inputs(self, mode: SensorMode) -> Dict[str, Any]:
         out = super().preparation_inputs(mode)
         if not float(self.options["right_row_shift_px"] or 0.0):
             out["options"].pop("right_row_shift_px", None)   # keeps cache keys of unshifted inputs
+        # each mode's cache key only depends on the options its conversion reads
+        lidar = "lidar" in mode.value
+        for k in (_CAMERA_OPTIONS if lidar else _LIDAR_OPTIONS):
+            out["options"].pop(k, None)
+        if lidar and (not mode.is_inertial or self.options["lidar_imu_source"] != "zed2"):
+            out["options"].pop("imu_topic", None)
+        if lidar and (not mode.is_inertial or self.options["lidar_imu_source"] != "livox"):
+            out["options"].pop("lidar_imu_topic", None)
         return out
 
     # ---- bag access ------------------------------------------------------
@@ -322,7 +396,37 @@ class LunaPolarisAdapter(DatasetAdapter):
             return T_body_cam0
         if sensor_frame == "imu":
             return T_body_cam0 @ self._T_cam0_imu()[0]
+        if sensor_frame == "lidar":
+            return tree.lookup(self.options["gt_body_frame"], self.options["lidar_frame"])
         return None
+
+    def lidar_calibration(self) -> Dict[str, Any]:
+        """LiDAR -> IMU extrinsic of the IMU used for LiDAR-inertial inputs (``lidar_imu_source``).
+
+        ``T_imu_lidar`` is the LiDAR pose in the IMU frame (FAST-LIO's extrinsic_R/extrinsic_T)."""
+        src = self.options["lidar_imu_source"]
+        T_body_lidar = self.T_gt_body_sensor("lidar")
+        if T_body_lidar is None:
+            raise ValueError(f"no /tf_static path {self.options['gt_body_frame']} -> {self.options['lidar_frame']}")
+        if src == "zed2":
+            T_body_imu = self.T_gt_body_sensor("imu")
+            T, parent, child, spread, n = self._T_cam0_imu()
+            return {"imu_source": "zed2", "imu_topic": self.options["imu_topic"], "imu_frame": child,
+                    "lidar_frame": self.options["lidar_frame"],
+                    "T_imu_lidar": (invert_T(T_body_imu) @ T_body_lidar).tolist(),
+                    "source": f"/tf_static {self.options['gt_body_frame']}->{self.options['lidar_frame']} and "
+                              f"->{self.options['cam0_frame']} (nominal URDF), {self.options['cam_imu_topic']} "
+                              f"({parent}->{child})",
+                    "time_offset_s": None, "accel_unit_in_bag": "m/s^2",
+                    "notes": ["LiDAR-IMU time offset not published; gyro cross-correlation puts it within "
+                              "about +-25 ms on sequence_01/11 (not applied)"]}
+        return {"imu_source": "livox", "imu_topic": self.options["lidar_imu_topic"],
+                "imu_frame": self.options["lidar_frame"], "lidar_frame": self.options["lidar_frame"],
+                "T_imu_lidar": np.eye(4).tolist(),
+                "source": "identity: the Livox IMU messages are stamped in the LiDAR frame (no separate "
+                          "IMU frame or offset is published)",
+                "time_offset_s": 0.0, "accel_unit_in_bag": "g",
+                "notes": ["Livox IMU is heavily decimated in LunaPolaris bags (gaps up to ~0.9 s)"]}
 
     def validate(self, mode: SensorMode):
         problems = super().validate(mode)
@@ -331,10 +435,110 @@ class LunaPolarisAdapter(DatasetAdapter):
                 self.stereo_calibration()
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"stereo calibration invalid: {exc}")
+        if not problems and mode in (SensorMode.LIDAR, SensorMode.LIDAR_INERTIAL):
+            if mode.is_inertial:
+                topic = self.lidar_imu_topic()
+                if self._topic_counts().get(topic, 0) == 0:
+                    problems.append(f"LiDAR-inertial IMU topic {topic} has no messages")
+            try:
+                self.lidar_calibration()
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"LiDAR calibration invalid: {exc}")
         return problems
 
+    def lidar_imu_topic(self) -> str:
+        return self.options["imu_topic" if self.options["lidar_imu_source"] == "zed2" else "lidar_imu_topic"]
+
     # ---- conversion ------------------------------------------------------
+    def _prepare_lidar(self, mode: SensorMode, out_dir: Path) -> PreparedInput:
+        """lidar/<end ns>.bin per scan (LIDAR_POINT_DTYPE, raw points in message order), frames.csv with
+        the scan end time (latest point stamp) and, for lidar_inertial, imu.csv in m/s^2."""
+        out_dir = Path(out_dir)
+        (out_dir / "lidar").mkdir(parents=True, exist_ok=True)
+        rows, lag, spans, n_pts, n_zero = [], [], [], [], 0
+        stats = {"msgs": 0, "duplicate_end_stamps": 0, "first_point_before_header": 0,
+                 "non_monotonic_points_max": 0, "last_point_not_latest": 0, "frame_ids": set()}
+        with self._reader() as r:
+            conns = [c for c in r.connections if c.topic == self.options["lidar_topic"]]
+            if not conns:
+                raise KeyError(f"topic {self.options['lidar_topic']} not in bag {self.bag_dir}")
+            seen = set()
+            for c, t_bag, raw in r.messages(connections=conns):
+                m = r.deserialize(raw, c.msgtype)
+                stats["msgs"] += 1
+                stats["frame_ids"].add(m.header.frame_id)
+                t, pts = livox_points(m)
+                if not len(t):
+                    continue
+                h = _stamp_ns(m.header)
+                start, end = min(h, int(t.min())), int(t.max())
+                stats["first_point_before_header"] += int(t.min() < h)
+                stats["non_monotonic_points_max"] = max(stats["non_monotonic_points_max"], int((np.diff(t) < 0).sum()))
+                stats["last_point_not_latest"] += int(t[-1] != end)
+                if end in seen:
+                    stats["duplicate_end_stamps"] += 1
+                    continue
+                seen.add(end)
+                pts["offset_ns"] = (t - start).astype(np.uint32)
+                rel = f"lidar/{end}.bin"
+                write_lidar_scan(out_dir / rel, start, pts)
+                rows.append((end, rel, ""))
+                lag.append(t_bag - h)
+                spans.append((end - start) * 1e-6)
+                n_pts.append(len(pts))
+                n_zero += int(np.sum((pts["x"] == 0) & (pts["y"] == 0) & (pts["z"] == 0)))
+        rows.sort()
+        n = write_frames_csv(out_dir / "frames.csv", rows)
+
+        n_imu, imu_stats = 0, {}
+        if mode.is_inertial:
+            topic = self.lidar_imu_topic()
+            scale = LIVOX_G if self.options["lidar_imu_source"] == "livox" else 1.0
+            t, w, a = [], [], []
+            for _, m in self._iter(topic):
+                t.append(_stamp_ns(m.header))
+                w.append([m.angular_velocity.x, m.angular_velocity.y, m.angular_velocity.z])
+                a.append([m.linear_acceleration.x, m.linear_acceleration.y, m.linear_acceleration.z])
+            t, w, a = np.array(t, dtype=np.int64), np.array(w), np.array(a) * scale
+            order = np.argsort(t, kind="stable")
+            t, w, a = t[order], w[order], a[order]
+            keep = np.r_[True, np.diff(t) > 0]
+            n_imu = write_imu_csv(out_dir / "imu.csv", t[keep], w[keep], a[keep])
+            dt = np.diff(t[keep]) * 1e-9
+            imu_stats = {"imu_source": self.options["lidar_imu_source"], "imu_topic": topic,
+                         "imu_accel_scale_to_m_s2": scale, "imu_dropped_duplicates": int((~keep).sum()),
+                         "imu_dt_median_s": float(np.median(dt)), "imu_dt_max_s": float(dt.max()),
+                         "imu_gaps_over_0.1s": int((dt > 0.1).sum()),
+                         "lidar_calibration": self.lidar_calibration()}
+        lag_s = np.array(lag, dtype=float) * 1e-9
+        frame_dt = np.diff([r[0] for r in rows]) * 1e-9 if len(rows) > 1 else np.array([np.nan])
+        manifest = {
+            "dataset": self.name, "sequence": self.sequence, "mode": mode.value,
+            "source": str(self.bag_dir), "n_frames": n, "n_imu": n_imu,
+            "lidar_topic": self.options["lidar_topic"], "lidar_frame_ids": sorted(stats.pop("frame_ids")),
+            "lidar_msgs": stats.pop("msgs"), **{f"lidar_{k}": v for k, v in stats.items()},
+            "lidar_format": "lidar/<end ns>.bin: magic SBLIDAR1, int64 start_ns, uint32 n, uint32 record size, "
+                            f"then records {LIDAR_POINT_DTYPE.descr} (little endian); all points of the "
+                            "message in message order, including zero (no return) points",
+            "timestamps": "frames.csv timestamp = scan end = latest per-point timestamp (integer ns); "
+                          "start_ns = min(header stamp, earliest point); offset_ns = point stamp - start_ns",
+            "points_per_scan": {"median": float(np.median(n_pts)), "min": int(min(n_pts)), "max": int(max(n_pts))}
+            if n_pts else None,
+            "zero_points_fraction": n_zero / max(1, sum(n_pts)),
+            "scan_span_ms": {"median": float(np.median(spans)), "max": float(max(spans))} if spans else None,
+            "bag_receive_minus_header_s": {"median": float(np.median(lag_s)), "max": float(lag_s.max())}
+            if len(lag_s) else None,
+            "frame_dt_s": {"median": float(np.nanmedian(frame_dt)), "max": float(np.nanmax(frame_dt))},
+            "preprocessing": ["intensity (float, integer-valued) stored as uint8 reflectivity",
+                              *(["Livox IMU acceleration converted from g to m/s^2 (x 9.80665)"]
+                                if mode.is_inertial and self.options["lidar_imu_source"] == "livox" else [])],
+            **imu_stats,
+        }
+        return PreparedInput(out_dir, mode, n, n_imu, manifest)
+
     def prepare_offline(self, mode: SensorMode, out_dir: Path) -> PreparedInput:
+        if mode in (SensorMode.LIDAR, SensorMode.LIDAR_INERTIAL):
+            return self._prepare_lidar(mode, out_dir)
         import cv2
 
         if mode not in (SensorMode.STEREO, SensorMode.STEREO_INERTIAL, SensorMode.MONO,
