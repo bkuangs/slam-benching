@@ -44,6 +44,21 @@ def pose_matrix(row) -> np.ndarray:
     return T
 
 
+def gt_keyframe_poses(run: Path, t_ns: np.ndarray):
+    """Ground-truth T_world_cam0 at the keyframe times (LunaPolaris) and which keyframes have ground truth."""
+    import yaml
+    from slambench.datasets.lunapolaris import LunaPolarisAdapter
+    from slambench.evaluation.map_quality import PoseInterpolator
+    ds = yaml.safe_load((run / "config.resolved.yaml").read_text())["dataset"]
+    if ds["name"] != "lunapolaris":
+        raise SystemExit("--gt-poses is implemented for LunaPolaris only")
+    ad = LunaPolarisAdapter(Path(ds["root"]).expanduser(), ds["sequence"], ds.get("options") or {})
+    gt = ad.ground_truth()
+    pose = PoseInterpolator(gt.timestamps_ns, gt.positions, gt.quaternions_xyzw, ad.T_gt_body_sensor("cam0"))
+    keep = pose.valid(t_ns)
+    return pose.poses(t_ns[keep]), keep
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
@@ -52,6 +67,10 @@ def main():
     ap.add_argument("--max-depth", type=float, default=5.0, help="ignore depth beyond this, m (default 5)")
     ap.add_argument("--num-disp", type=int, default=64, help="SGBM disparity range, multiple of 16")
     ap.add_argument("--block", type=int, default=5, help="SGBM block size (odd)")
+    ap.add_argument("--uniqueness", type=int, default=10, help="SGBM uniquenessRatio (higher = stricter)")
+    ap.add_argument("--gt-poses", action="store_true",
+                    help="fuse at ground-truth camera poses (LunaPolaris) instead of ORB-SLAM3's; the mesh is "
+                         "then in the ground-truth world (isolates depth error from pose error)")
     args = ap.parse_args()
 
     run = args.run_dir.resolve()
@@ -72,10 +91,16 @@ def main():
     if match_err_ms > 5:
         raise SystemExit(f"keyframe/frame timestamp mismatch up to {match_err_ms:.1f} ms")
 
+    if args.gt_poses:
+        T_wc, keep = gt_keyframe_poses(run, stamps[idx])
+        kfs, idx = kfs[keep].reset_index(drop=True), idx[keep]
+    else:
+        T_wc = np.array([pose_matrix(r) for r in kfs.itertuples()])
+
     sgbm = cv2.StereoSGBM_create(
         minDisparity=0, numDisparities=args.num_disp, blockSize=args.block,
         P1=8 * 3 * args.block ** 2, P2=32 * 3 * args.block ** 2, disp12MaxDiff=1,
-        uniquenessRatio=10, speckleWindowSize=100, speckleRange=2, mode=cv2.STEREO_SGBM_MODE_SGBM)
+        uniquenessRatio=args.uniqueness, speckleWindowSize=100, speckleRange=2, mode=cv2.STEREO_SGBM_MODE_SGBM)
     intr = o3d.camera.PinholeCameraIntrinsic(calib["w"], calib["h"], calib["fx"], calib["fy"],
                                              calib["cx"], calib["cy"])
     vol = o3d.pipelines.integration.ScalableTSDFVolume(
@@ -99,7 +124,7 @@ def main():
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             o3d.geometry.Image(np.ascontiguousarray(left[:, :, ::-1])), o3d.geometry.Image(depth),
             depth_scale=1.0, depth_trunc=args.max_depth, convert_rgb_to_intensity=False)
-        vol.integrate(rgbd, intr, np.linalg.inv(pose_matrix(kfs.iloc[k])))  # extrinsic = T_cw
+        vol.integrate(rgbd, intr, np.linalg.inv(T_wc[k]))  # extrinsic = T_cw
         t3 = time.perf_counter()
         t_load.append(t1 - t0); t_depth.append(t2 - t1); t_fuse.append(t3 - t2)
         if (k + 1) % 100 == 0:
@@ -114,19 +139,27 @@ def main():
     o3d.io.write_point_cloud(str(out / "cloud.ply"), cloud)
 
     # Consistency: distance from each sparse map point (triangulated / bundle-adjusted by ORB-SLAM3)
-    # to the fused surface, for points inside the depth range of some keyframe.
+    # to the fused surface, for points inside the depth range of some keyframe (ORB-SLAM3 poses only;
+    # with --gt-poses the sparse map is in another frame).
     mp = pd.read_csv(alg / "map_points.csv")
     mp = mp[mp.in_final_frame == 1][["x", "y", "z"]].to_numpy()
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
-    kf_pos = kfs[["tx", "ty", "tz"]].to_numpy()
-    near = np.min(np.linalg.norm(mp[:, None, :] - kf_pos[None, ::5, :], axis=2), axis=1) <= args.max_depth
-    dist = scene.compute_distance(o3d.core.Tensor(mp[near], dtype=o3d.core.Dtype.Float32)).numpy()
+    sparse_check = None
+    if not args.gt_poses:
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+        kf_pos = T_wc[:, :3, 3]
+        near = np.min(np.linalg.norm(mp[:, None, :] - kf_pos[None, ::5, :], axis=2), axis=1) <= args.max_depth
+        dist = scene.compute_distance(o3d.core.Tensor(mp[near], dtype=o3d.core.Dtype.Float32)).numpy()
+        sparse_check = {"total": int(len(mp)), "within_depth_range": int(near.sum()),
+                        "dist_to_mesh_m": {"median": float(np.median(dist)),
+                                           "p90": float(np.percentile(dist, 90)),
+                                           "frac_within_voxel": float((dist <= args.voxel).mean())}}
 
     ms = lambda a: {"mean": 1e3 * float(np.mean(a)), "p95": 1e3 * float(np.percentile(a, 95))}
     stats = {
         "run_dir": str(run), "n_keyframes": int(len(idx)), "voxel_m": args.voxel, "max_depth_m": args.max_depth,
-        "sgbm": {"num_disparities": args.num_disp, "block_size": args.block},
+        "pose_source": "ground_truth" if args.gt_poses else "orbslam3",
+        "sgbm": {"num_disparities": args.num_disp, "block_size": args.block, "uniqueness_ratio": args.uniqueness},
         "valid_depth_pixel_fraction_mean": float(np.mean(valid_frac)),
         "per_keyframe_ms": {"image_load": ms(t_load), "stereo_depth": ms(t_depth), "tsdf_integrate": ms(t_fuse)},
         "mesh_extract_s": t_extract, "total_wall_s": wall_s, "total_process_cpu_s": cpu_s,
@@ -134,10 +167,7 @@ def main():
         "mesh": {"vertices": len(mesh.vertices), "triangles": len(mesh.triangles),
                  "file_mb": os.path.getsize(out / "mesh.ply") / 1e6},
         "cloud_points": len(cloud.points),
-        "sparse_points": {"total": int(len(mp)), "within_depth_range": int(near.sum()),
-                          "dist_to_mesh_m": {"median": float(np.median(dist)),
-                                             "p90": float(np.percentile(dist, 90)),
-                                             "frac_within_voxel": float((dist <= args.voxel).mean())}},
+        "sparse_points": sparse_check,
     }
     (out / "dense_stats.json").write_text(json.dumps(stats, indent=2))
     print(json.dumps(stats, indent=2))

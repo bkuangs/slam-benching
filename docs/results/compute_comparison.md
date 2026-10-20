@@ -94,7 +94,7 @@ world frame (its first camera pose), not terrain.
   surface to ~1.5–2 cm, so the keyframe poses and stereo depth are consistent.
 * The TSDF surface covers more 10 cm cells than RTAB-Map's exported cloud (48–68k vs 28–39k; ORB
   sparse map: 3–6k), partly because a TSDF surface is a few voxels thick and noisy depth at range
-  (e.g. the dark backdrop) adds fringe. Not a like-for-like accuracy comparison; no ground-truth geometry.
+  (e.g. the dark backdrop) adds fringe. Accuracy against ground-truth geometry is measured below.
 * Limits: offline (after the run), no online map updates on loop closure, SGBM single-threaded, no
   free-space / occupancy output (the TSDF has it implicitly; an OctoMap export would be next).
 
