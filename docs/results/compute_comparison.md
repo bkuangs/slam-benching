@@ -98,6 +98,96 @@ world frame (its first camera pose), not terrain.
 * Limits: offline (after the run), no online map updates on loop closure, SGBM single-threaded, no
   free-space / occupancy output (the TSDF has it implicitly; an OctoMap export would be next).
 
+## Map quality against a LiDAR reference
+`scripts/eval_map_quality.py` builds a reference map from the robot's Livox LiDAR: all ~7,800 scans,
+de-skewed per point, placed with motion capture and the `/tf_static` extrinsic, in 2 cm voxels seen
+≥4 times. Two half-maps built from alternating scans agree to a median of 0.4 cm (97% within 2 cm),
+so the reference is far tighter than the errors measured. Each map is placed in the mocap world by
+fitting its own keyframe/node trajectory to ground truth (SE3), then scored Tanks-and-Temples style:
+* **precision@τ**: fraction of map points (within the LiDAR's coverage) within τ of the reference;
+  **accuracy** = median of those distances.
+* **recall@τ**: fraction of reference voxels the camera actually saw (frustum ≤ 5 m, occlusion-tested
+  from ground-truth poses; ~57% of the reference) that have a map point within τ.
+* **F@τ**: harmonic mean of the two. τ = 5 and 10 cm.
+
+Variants: `orb_tsdf` (SGBM + TSDF at ORB-SLAM3 keyframe poses, as above), `dense_strict` (max depth
+3 m, SGBM uniqueness 15), `dense_gt` (same keyframe images fused at ground-truth poses: depth error
+only), `dense_rtab` (same keyframe images fused at RTAB-Map's poses from its `trajectory.tum`: compares
+the two systems' poses with the depth pipeline held fixed), and RTAB-Map's own exported cloud / OctoMap
+(occupied cells). Maps are aligned by trajectory (SE3 on positions) unless noted.
+
+Run 1 of each configuration:
+
+| seq | map | points | accuracy (median) | precision@10cm | recall@10cm | F@10cm | F@5cm |
+|---|---|---|---|---|---|---|---|
+| 01 | ORB sparse | 19k | 5.2 cm | 0.94 | 0.21 | 0.35 | 0.07 |
+| 01 | ORB + TSDF | 411k | 5.4 cm | 0.66 | 0.49 | **0.56** | 0.31 |
+| 01 | ORB + TSDF strict | 257k | 5.0 cm | 0.78 | 0.40 | 0.53 | 0.24 |
+| 01 | TSDF at GT poses | 398k | 4.5 cm | 0.63 | 0.45 | 0.53 | 0.33 |
+| 01 | RTAB-Map cloud | 629k | 8.3 cm | 0.58 | 0.40 | 0.47 | 0.25 |
+| 01 | RTAB-Map OctoMap | 81k | 8.1 cm | 0.59 | 0.34 | 0.43 | 0.20 |
+| 02 | ORB sparse | 12k | 5.9 cm | 0.88 | 0.13 | 0.23 | 0.04 |
+| 02 | ORB + TSDF | 340k | 7.0 cm | 0.61 | 0.39 | **0.48** | 0.24 |
+| 02 | ORB + TSDF strict | 241k | 7.1 cm | 0.66 | 0.29 | 0.40 | 0.17 |
+| 02 | TSDF at GT poses | 354k | 2.4 cm | 0.69 | 0.56 | 0.62 | 0.42 |
+| 02 | RTAB-Map cloud | 745k | 13.7 cm | 0.35 | 0.29 | 0.32 | 0.12 |
+| 02 | RTAB-Map OctoMap | 96k | 13.2 cm | 0.36 | 0.23 | 0.28 | 0.08 |
+| 11 | ORB sparse | 8k | 5.2 cm | 0.87 | 0.08 | 0.15 | 0.03 |
+| 11 | ORB + TSDF | 409k | 6.6 cm | 0.60 | 0.54 | **0.57** | 0.34 |
+| 11 | ORB + TSDF strict | 212k | 6.6 cm | 0.64 | 0.35 | 0.45 | 0.22 |
+| 11 | TSDF at GT poses | 393k | 3.1 cm | 0.66 | 0.60 | 0.63 | 0.42 |
+| 11 | RTAB-Map cloud | 525k | 12.7 cm | 0.40 | 0.26 | 0.31 | 0.13 |
+| 11 | RTAB-Map OctoMap | 71k | 12.8 cm | 0.40 | 0.19 | 0.26 | 0.09 |
+
+All 3 repeats (min–max over runs; RTAB-Map run *i* paired with ORB-SLAM3 run *i*):
+
+| seq | map | F@10cm | median error |
+|---|---|---|---|
+| 01 | ORB + TSDF | 0.56–0.57 | 5.4–5.6 cm |
+| 01 | TSDF at RTAB-Map poses | 0.54–0.55 | 5.9–6.1 cm |
+| 01 | RTAB-Map cloud | 0.47–0.49 | 8.2–8.3 cm |
+| 02 | ORB + TSDF | 0.48–0.49 | 6.8–7.0 cm |
+| 02 | TSDF at RTAB-Map poses | 0.47–0.48 | 7.3–7.5 cm |
+| 02 | RTAB-Map cloud | 0.32 | 13.5–14.2 cm |
+| 11 | ORB + TSDF | 0.56–0.57 | 6.4–6.6 cm |
+| 11 | TSDF at RTAB-Map poses | 0.56–0.57 | 6.3–6.8 cm |
+| 11 | RTAB-Map cloud | 0.31–0.32 | 12.6–13.1 cm |
+
+![seq01 map quality](figures/seq01_map_quality.png)
+
+* **The map-building step, not the SLAM poses, decides map quality here.** Fusing the same keyframe
+  images at RTAB-Map's poses gives almost the same map as at ORB-SLAM3's (F@10cm within 0.02, median
+  error within 0.5 cm, all sequences and repeats). RTAB-Map's own cloud is clearly worse (F@10cm
+  0.31–0.49 vs 0.47–0.57) because it stacks per-frame stereo points: compared directly with the TSDF
+  built at its own poses (same frame, no alignment), it lies 6 cm away at the median and 17–19 cm at
+  p90, i.e. it is a thick, noisy shell around the surface, and its floor sits 8–12 cm higher than the
+  TSDF's. TSDF fusion averages many views and removes most of that. So the earlier result "ORB-SLAM3 +
+  TSDF beats RTAB-Map" is really "TSDF fusion beats RTAB-Map's cloud export"; either SLAM system's
+  poses would do.
+* **Run-to-run spread is tiny** (≤0.02 F, ≤0.7 cm median error), far smaller than the gaps above.
+* **The alignment method doesn't change the picture.** Aligning by camera orientations (rotation from
+  the chordal mean of per-pose orientation differences, then translation) instead of positions only
+  changes the fitted tilt by 0.2–1.6° and F@10cm by ≤0.04, and every ranking holds. Both fits leave a
+  ~4° RMS orientation residual for *both* systems, which a constant error in the nominal
+  marker→camera extrinsic would produce; that affects absolute numbers, not the comparison.
+* **The sparse ORB-SLAM3 map is accurate but nearly empty**: 86–94% of its points are within 10 cm, but
+  it covers only 8–21% of the visible surface.
+* **Pose error is about half of the TSDF's error** on seq02/11: fusing the same depth at ground-truth
+  poses halves the median error (7 → 2.4 cm, 6.6 → 3.1 cm) and lifts F@10cm to ~0.62. The rest is
+  stereo depth noise (and the floor/backdrop fringe visible in the figure). On seq01 the gain is small.
+  The poses of the two SLAM systems are about equally good for this.
+* **Stricter SGBM didn't help** (one setting tried): slightly higher precision, much lower recall, lower F.
+* **Height offsets.** ICP against the (floor-dominated) reference moves RTAB-Map's cloud down 28–34 cm,
+  TSDFs at either system's poses down 10–17 cm, and the GT-pose TSDF up 5–10 cm. The cloud's extra
+  ~15 cm comes from its raised, noisy floor (above), not from its poses. The remaining offset shared by
+  both systems' TSDFs is unexplained (candidates: the nominal camera/LiDAR extrinsics, small tilt
+  errors that a flat trajectory can't resolve). After ICP every dense map scores F@10cm 0.63–0.76 with
+  ~1–2 cm median error, but that ICP also slides maps 10–25 cm sideways (a flat room barely constrains
+  in-plane motion), so post-ICP numbers are an optimistic bound and stay out of the tables.
+* Caveats: nominal LiDAR and camera extrinsics; the LiDAR sees ~6 m, so far walls and backdrop are
+  outside the scored region; one room; RTAB-Map's cloud export used default settings (no voxel
+  filtering, noise removal or depth limits beyond the run config), which could narrow the gap.
+
 ## Caveat: input reading did not keep up with real time
 Wall time per frame was ~96 ms (ORB-SLAM3) and ~133 ms (RTAB-Map) against the 68 ms frame period:
 reading a stereo PNG pair from the shared scratch filesystem takes ~90 ms, so playback ran ~1.4x /

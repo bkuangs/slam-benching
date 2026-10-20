@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from slambench.evaluation.map_quality import (PoseInterpolator, VoxelAccumulator, region_mask, score,
+from slambench.evaluation.map_quality import (align_by_orientation, PoseInterpolator, VoxelAccumulator, region_mask, score,
                                               umeyama_se3, visible_mask, voxel_downsample)
 
 
@@ -80,3 +80,18 @@ def test_region_mask_and_score():
     assert s["precision_5cm"] == pytest.approx(0.5)
     assert s["recall_5cm"] == pytest.approx(0.5, abs=0.05)
     assert s["fscore_10cm"] == pytest.approx(0.5, abs=0.02)
+
+
+def test_align_by_orientation_pins_tilt_on_planar_path():
+    rng = np.random.default_rng(0)
+    n = 50
+    p_gt = np.c_[rng.uniform(0, 5, n), rng.uniform(0, 5, n), np.zeros(n)]  # planar path
+    R_gt = Rotation.random(n, random_state=1).as_matrix()
+    R_true = Rotation.from_euler("xyz", [2.0, -1.5, 30.0], degrees=True).as_matrix()
+    t_true = np.array([0.3, -1.0, 0.2])
+    # estimate frame: x_gt = R_true x_est + t_true
+    p_est = (p_gt - t_true) @ R_true
+    R_est = np.einsum("ji,njk->nik", R_true, R_gt)
+    R, t = align_by_orientation(R_est, p_est, R_gt, p_gt)
+    np.testing.assert_allclose(R, R_true, atol=1e-9)
+    np.testing.assert_allclose(t, t_true, atol=1e-9)

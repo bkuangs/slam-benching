@@ -10,12 +10,17 @@ Cached in <out>/<sequence>/reference_*.npz.
 
 Estimated maps evaluated (each if present):
   orb_sparse         ORB-SLAM3 sparse map points (map_points.csv, final map)
-  orb_tsdf[:<dir>]   mesh from scripts/dense_from_keyframes.py (<orb run>/<dir>/mesh.ply, sampled)
+  orb_tsdf[:<dir>]   mesh from scripts/dense_from_keyframes.py (<orb run>/<dir>/mesh.ply, sampled); with
+                     --poses-tum it is fused at another run's (e.g. RTAB-Map's) poses
   rtab_cloud         RTAB-Map dense cloud export (rtabmap_cloud.ply)
   rtab_octomap       RTAB-Map OctoMap occupied cell centres (rtabmap_octomap.ply, free cells removed)
-Each is moved into the ground-truth world by the SE3 that best aligns its own keyframe / node positions
-to the ground-truth camera positions at the same times (as ATE does), so trajectory errors show up as
-map errors. A second score after ICP against the reference (point-to-plane, 10 cm) separates local
+  lio_map            FAST-LIO voxel map (fastlio_map.ply; built from the same Livox scans as the reference,
+                     but placed with FAST-LIO's own poses instead of motion capture)
+Each is moved into the ground-truth world from the sensor poses it was built from (keyframes, nodes, a
+dense dir's poses.csv, or FAST-LIO's per-scan LiDAR poses against ground truth in the LiDAR frame), in two ways, so trajectory errors show up as map errors:
+  aligned_by_trajectory   SE3 best aligning those camera positions to ground truth (as ATE does); a
+                          nearly planar path leaves the tilt poorly constrained
+  aligned_by_orientation  rotation from the camera orientations (chordal mean), translation from positions A second score after ICP against the reference (point-to-plane, 10 cm) separates local
 geometry from that global misplacement. Maps built from ground-truth poses (dense_from_keyframes.py
 --gt-poses) are already in the ground-truth world and are not aligned.
 
@@ -25,8 +30,10 @@ Metrics (slambench/evaluation/map_quality.py), all maps voxelised to --voxel fir
   recall@tau     reference points the camera could see (GT camera poses at ~1 Hz, depth <= --max-depth,
                  z-buffer against occlusion) that have an estimated point within tau
   fscore@tau     harmonic mean
+  recall_all@tau recall over every reference voxel (not only camera-visible ones), e.g. for LiDAR maps
 
-Usage: python scripts/eval_map_quality.py --orb <orbslam3 run> --rtab <rtabmap run> [--dense-dir dense ...]
+Usage: python scripts/eval_map_quality.py --orb <orbslam3 run> --rtab <rtabmap run> [--lio <fastlio run>]
+                                          [--dense-dir dense ...]
 Needs open3d.
 """
 import argparse
@@ -42,9 +49,10 @@ import open3d as o3d
 import pandas as pd
 import yaml
 from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
 
 from slambench.datasets.lunapolaris import LunaPolarisAdapter
-from slambench.evaluation.map_quality import (PoseInterpolator, VoxelAccumulator, region_mask, score,
+from slambench.evaluation.map_quality import (align_by_orientation, PoseInterpolator, VoxelAccumulator, region_mask, score,
                                               umeyama_se3, visible_mask, voxel_downsample)
 
 LIDAR_TOPIC = "/leo01/livox/lidar"
@@ -126,15 +134,21 @@ def read_ply_points(path: Path):
     return np.asarray(pc.points), (np.asarray(pc.colors) if pc.has_colors() else None)
 
 
-def load_maps(orb: Path, rtab: Path, dense_dirs, voxel):
-    """name -> (points, trajectory t_ns, trajectory positions or None if already in the GT world)."""
+def load_maps(orb: Path, rtab: Path, lio: Path, dense_dirs, voxel):
+    """name -> (points, trajectory) where trajectory = (t_ns, positions, quaternions xyzw[, sensor frame])
+    of the sensor poses the map was built from (camera unless a frame is given), or None if the map is
+    already in the ground-truth world."""
+    def traj_of(df):
+        return (df.timestamp_ns.to_numpy(np.int64), df[["tx", "ty", "tz"]].to_numpy(),
+                df[["qx", "qy", "qz", "qw"]].to_numpy())
+
     maps = {}
     if orb:
         kf = pd.read_csv(orb / "algorithm" / "keyframes.csv")
         kf = kf[kf.in_final_frame == 1]
-        traj = (kf.timestamp_ns.to_numpy(np.int64), kf[["tx", "ty", "tz"]].to_numpy())
+        traj = traj_of(kf)
         mp = pd.read_csv(orb / "algorithm" / "map_points.csv")
-        maps["orb_sparse"] = (mp[mp.in_final_frame == 1][["x", "y", "z"]].to_numpy(), *traj)
+        maps["orb_sparse"] = (mp[mp.in_final_frame == 1][["x", "y", "z"]].to_numpy(), traj)
         for d in dense_dirs:
             mesh_path = orb / d / "mesh.ply"
             if not mesh_path.exists():
@@ -146,22 +160,34 @@ def load_maps(orb: Path, rtab: Path, dense_dirs, voxel):
             pts = np.asarray(mesh.sample_points_uniformly(n).points)
             name = "orb_tsdf" if d == "dense" else f"orb_tsdf:{d}"
             if stats.get("pose_source") == "ground_truth":
-                maps[name] = (pts, None, None)
+                maps[name] = (pts, None)
+            elif (orb / d / "poses.csv").exists():
+                maps[name] = (pts, traj_of(pd.read_csv(orb / d / "poses.csv")))
+            elif stats.get("pose_source", "orbslam3") == "orbslam3":
+                maps[name] = (pts, traj)
             else:
-                maps[name] = (pts, *traj)
+                print(f"  skip {mesh_path} (no poses.csv for pose source {stats['pose_source']})")
     if rtab:
         nodes = pd.read_csv(rtab / "algorithm" / "nodes.csv")
         nodes = nodes[nodes.in_final == 1]
-        traj = (nodes.timestamp_ns.to_numpy(np.int64), nodes[["tx", "ty", "tz"]].to_numpy())
+        traj = traj_of(nodes)
         p = rtab / "algorithm" / "rtabmap_cloud.ply"
         if p.exists():
-            maps["rtab_cloud"] = (read_ply_points(p)[0], *traj)
+            maps["rtab_cloud"] = (read_ply_points(p)[0], traj)
         p = rtab / "algorithm" / "rtabmap_octomap.ply"
         if p.exists():
             pts, col = read_ply_points(p)
             # rtabmap-export writes all OctoMap leaves: occupied in image colour, free cells white
             occ = ~np.all(col > 0.999, axis=1) if col is not None else np.ones(len(pts), bool)
-            maps["rtab_octomap"] = (pts[occ], *traj)
+            maps["rtab_octomap"] = (pts[occ], traj)
+    if lio:
+        log = pd.read_csv(lio / "algorithm" / "frame_log.csv")
+        log = log[log.pose_valid == 1]
+        p = lio / "algorithm" / "fastlio_map.ply"
+        if p.exists():
+            maps["lio_map"] = (read_ply_points(p)[0], (*traj_of(log), "lidar"))
+        else:
+            print(f"  skip {p} (missing)")
     return maps
 
 
@@ -184,6 +210,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--orb", type=Path, help="ORB-SLAM3 run directory")
     ap.add_argument("--rtab", type=Path, help="RTAB-Map run directory (with dense export)")
+    ap.add_argument("--lio", type=Path, help="FAST-LIO run directory (fastlio_map.ply)")
     ap.add_argument("--dense-dir", action="append", default=None,
                     help="dense_from_keyframes.py output dir(s) inside the ORB-SLAM3 run (default: dense)")
     ap.add_argument("--out", type=Path, default=Path("~/scratch/slam-bench-work/map_quality").expanduser())
@@ -195,10 +222,10 @@ def main():
     ap.add_argument("--max-depth", type=float, default=5.0, help="camera depth counted as visible (m)")
     ap.add_argument("--taus", type=float, nargs="+", default=[0.05, 0.10])
     args = ap.parse_args()
-    if not (args.orb or args.rtab):
-        ap.error("give --orb and/or --rtab")
+    if not (args.orb or args.rtab or args.lio):
+        ap.error("give --orb, --rtab and/or --lio")
     dense_dirs = args.dense_dir or ["dense"]
-    runs = [r.resolve() for r in (args.orb, args.rtab) if r]
+    runs = [r.resolve() for r in (args.orb, args.rtab, args.lio) if r]
     ad = adapter_for(runs[0])
     seq = yaml.safe_load((runs[0] / "config.resolved.yaml").read_text())["dataset"]["sequence"]
     out = args.out / seq
@@ -212,6 +239,9 @@ def main():
 
     gt = ad.ground_truth()
     cam = PoseInterpolator(gt.timestamps_ns, gt.positions, gt.quaternions_xyzw, ad.T_gt_body_sensor("cam0"))
+    sensor_pose = {"cam0": cam,
+                   "lidar": PoseInterpolator(gt.timestamps_ns, gt.positions, gt.quaternions_xyzw,
+                                             ad.T_gt_body_sensor("lidar"))}
     left = ad.stereo_calibration().left
     vis_cache = out / f"visible_{tag}_d{args.max_depth}.npy"
     if vis_cache.exists():
@@ -230,35 +260,60 @@ def main():
     ref_pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
     results = {"sequence": seq, "orb_run": str(args.orb.resolve()) if args.orb else None,
                "rtab_run": str(args.rtab.resolve()) if args.rtab else None,
+               "lio_run": str(args.lio.resolve()) if args.lio else None,
                "reference": ref_info, "visible_fraction": float(vis.mean()), "maps": {}}
     aligned = {}
-    for name, (pts, t_ns, pos) in load_maps(args.orb and args.orb.resolve(), args.rtab and args.rtab.resolve(),
-                                            dense_dirs, args.voxel).items():
+    all_ref = np.ones(len(ref), bool)
+    for name, (raw, traj) in load_maps(args.orb and args.orb.resolve(), args.rtab and args.rtab.resolve(),
+                                       args.lio and args.lio.resolve(), dense_dirs, args.voxel).items():
         entry = {}
-        if t_ns is not None:
-            ok = cam.valid(t_ns)
-            gt_pos = cam.poses(t_ns[ok])[:, :3, 3]
-            R, t = umeyama_se3(pos[ok], gt_pos)
-            res = np.linalg.norm(gt_pos - (pos[ok] @ R.T + t), axis=1)
-            entry["alignment"] = {"pairs": int(ok.sum()), "trajectory_rmse_m": float(np.sqrt(np.mean(res ** 2)))}
-            pts = pts @ R.T + t
+        if traj is not None:
+            t_ns, pos, quat = traj[:3]
+            interp = sensor_pose[traj[3] if len(traj) > 3 else "cam0"]
+            ok = interp.valid(t_ns)
+            T_gt = interp.poses(t_ns[ok])
+            R_est = Rotation.from_quat(quat[ok]).as_matrix()
+            fits = {"aligned_by_trajectory": umeyama_se3(pos[ok], T_gt[:, :3, 3]),
+                    "aligned_by_orientation": align_by_orientation(R_est, pos[ok], T_gt[:, :3, :3], T_gt[:, :3, 3])}
+            entry["alignment"] = {"pairs": int(ok.sum()), "sensor_frame": traj[3] if len(traj) > 3 else "cam0"}
+            for key, (R, tr) in fits.items():
+                res = np.linalg.norm(T_gt[:, :3, 3] - (pos[ok] @ R.T + tr), axis=1)
+                rot_res = Rotation.from_matrix(np.einsum("ij,njk->nik", R, R_est)).inv() * \
+                    Rotation.from_matrix(T_gt[:, :3, :3])
+                entry["alignment"][key] = {"trajectory_rmse_m": float(np.sqrt(np.mean(res ** 2))),
+                                           "orientation_rms_deg": float(np.degrees(
+                                               np.sqrt(np.mean(rot_res.magnitude() ** 2))))}
+            # how differently the two fits orient the map's "up" axis (tilt only, ignores heading)
+            up = [R.T @ np.array([0.0, 0.0, 1.0]) for R, _ in fits.values()]
+            entry["alignment"]["tilt_difference_deg"] = float(np.degrees(np.arccos(np.clip(up[0] @ up[1], -1, 1))))
         else:
+            fits = {"aligned_by_trajectory": (np.eye(3), np.zeros(3))}
             entry["alignment"] = {"pairs": 0, "note": "built with ground-truth poses; no alignment"}
-        pts = voxel_downsample(pts, args.voxel)
-        inreg = region_mask(pts, ref)
-        entry["in_reference_region"] = float(inreg.mean())
-        pts = pts[inreg]
-        entry["aligned_by_trajectory"] = score(pts, ref, vis, args.taus, ref_tree)
-        T, entry["icp"] = icp_refine(pts, ref_pcd, 0.10)
-        entry["after_icp"] = score(pts @ T[:3, :3].T + T[:3, 3], ref, vis, args.taus, ref_tree)
+        for key, (R, tr) in fits.items():
+            pts = voxel_downsample(raw @ R.T + tr, args.voxel)
+            inreg = region_mask(pts, ref)
+            pts = pts[inreg]
+            s = score(pts, ref, vis, args.taus, ref_tree)
+            s["in_reference_region"] = float(inreg.mean())
+            s.update({k.replace("recall_", "recall_all_"): v for k, v in
+                      score(pts, ref, all_ref, args.taus, ref_tree).items() if k.startswith("recall_")})
+            T, icp = icp_refine(pts, ref_pcd, 0.10)
+            c = pts.mean(0)
+            icp["shift_at_map_centroid_m"] = (T[:3, :3] @ c + T[:3, 3] - c).tolist()
+            s["icp"] = icp
+            s["after_icp"] = score(pts @ T[:3, :3].T + T[:3, 3], ref, vis, args.taus, ref_tree)
+            entry[key] = s
+            if key == "aligned_by_trajectory":
+                aligned[name] = pts
+            prf = "  ".join(f"P/R/F@{k} {s['precision_' + k]:.2f}/{s['recall_' + k]:.2f}/{s['fscore_' + k]:.2f}"
+                            for k in (f"{round(tau * 100)}cm" for tau in args.taus))
+            dz = icp["shift_at_map_centroid_m"][2]
+            print(f"  {name:22s} {key.split('_')[-1]:11s} {s['n_points']:>9,} pts  acc med "
+                  f"{s['accuracy_median_m'] * 100:5.1f} cm  {prf}  | ICP dz {dz * 100:+.1f} cm "
+                  f"{icp['rotation_deg']:.2f} deg", flush=True)
+        if "tilt_difference_deg" in entry["alignment"]:
+            print(f"  {'':22s} tilt difference between the two fits {entry['alignment']['tilt_difference_deg']:.2f} deg")
         results["maps"][name] = entry
-        aligned[name] = pts
-        s = entry["aligned_by_trajectory"]
-        prf = "  ".join(f"P/R/F@{k} {s['precision_' + k]:.2f}/{s['recall_' + k]:.2f}/{s['fscore_' + k]:.2f}"
-                        for k in (f"{round(tau * 100)}cm" for tau in args.taus))
-        print(f"  {name:16s} {s['n_points']:>9,} pts  acc med {s['accuracy_median_m'] * 100:5.1f} cm  {prf}"
-              f"  | ICP shift {entry['icp']['point_shift_m']['median'] * 100:.1f} cm {entry['icp']['rotation_deg']:.2f} deg",
-              flush=True)
     (out / "map_quality.json").write_text(json.dumps(results, indent=2))
     plot(ref, vis, aligned, ref_tree, out / "map_quality.png", seq)
     print(f"wrote {out / 'map_quality.json'}, {out / 'map_quality.png'}")

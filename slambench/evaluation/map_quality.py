@@ -131,6 +131,16 @@ def umeyama_se3(src: np.ndarray, dst: np.ndarray):
     return R, md - R @ ms
 
 
+def align_by_orientation(R_est: np.ndarray, p_est: np.ndarray, R_gt: np.ndarray, p_gt: np.ndarray):
+    """R, t mapping an estimated trajectory onto ground truth, with R from the camera orientations
+    (chordal mean of R_gt_i R_est_i^T) and t from the positions given R. Unlike a position-only fit,
+    this pins the rotation (including tilt) even when the trajectory is nearly planar or straight."""
+    M = np.einsum("nij,nkj->ik", np.asarray(R_gt, float), np.asarray(R_est, float))
+    U, _, Vt = np.linalg.svd(M)
+    R = U @ np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))]) @ Vt
+    return R, np.mean(np.asarray(p_gt, float) - np.asarray(p_est, float) @ R.T, axis=0)
+
+
 def visible_mask(ref: np.ndarray, T_world_cam: Iterable[np.ndarray], fx: float, fy: float, cx: float,
                  cy: float, width: int, height: int, max_depth: float, min_depth: float = 0.2,
                  zbuf_decimation: int = 4, occlusion_tol: float = 0.15) -> np.ndarray:

@@ -4,10 +4,12 @@
 ORB-SLAM3 only keeps a sparse map. This post-processes a finished run: for every keyframe of the final
 map it computes a disparity image with OpenCV SGBM (left-right checked), converts it to depth with the
 run's rectified calibration and integrates it into an Open3D TSDF volume at the keyframe's final
-(loop-closed, bundle-adjusted) pose. Outputs in <run>/dense/ (or --out):
+(loop-closed, bundle-adjusted) pose, or at ground-truth poses (--gt-poses) or another run's poses
+(--poses-tum). Outputs in <run>/dense/ (or --out):
 
   mesh.ply          triangle mesh (marching cubes on the TSDF), vertex colors from the left images
   cloud.ply         TSDF surface points
+  poses.csv         the T_world_cam0 pose used for each fused keyframe
   dense_stats.json  timing (per-keyframe depth and fusion time, CPU), sizes and a consistency check:
                     distance from each sparse ORB-SLAM3 map point to the mesh
 
@@ -24,6 +26,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 import pandas as pd
+from scipy.spatial.transform import Rotation
 
 
 def load_calib(settings_yaml: Path):
@@ -42,6 +45,21 @@ def pose_matrix(row) -> np.ndarray:
     T[:3, :3] = o3d.geometry.get_rotation_matrix_from_quaternion([row.qw, row.qx, row.qy, row.qz])
     T[:3, 3] = [row.tx, row.ty, row.tz]
     return T
+
+
+def tum_poses(path: Path, t_ns: np.ndarray):
+    """T_world_cam0 from a TUM trajectory (seconds) at the given times, and which times it covers."""
+    from slambench.evaluation.map_quality import PoseInterpolator
+    rows = [ln.split() for ln in path.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
+    sec = [r[0].split(".") for r in rows]
+    tt = np.array([int(s[0]) * 10**9 + int((s[1] + "000000000")[:9]) if len(s) > 1 else int(s[0]) * 10**9
+                   for s in sec], np.int64)
+    v = np.array([[float(x) for x in r[1:8]] for r in rows])
+    pose = PoseInterpolator(tt, v[:, :3], v[:, 3:7], max_gap_s=0.25)
+    keep = pose.valid(t_ns)
+    if keep.mean() < 0.9:
+        print(f"warning: {path} covers only {keep.mean():.0%} of the keyframes")
+    return pose.poses(t_ns[keep]), keep
 
 
 def gt_keyframe_poses(run: Path, t_ns: np.ndarray):
@@ -71,6 +89,10 @@ def main():
     ap.add_argument("--gt-poses", action="store_true",
                     help="fuse at ground-truth camera poses (LunaPolaris) instead of ORB-SLAM3's; the mesh is "
                          "then in the ground-truth world (isolates depth error from pose error)")
+    ap.add_argument("--poses-tum", type=Path,
+                    help="fuse at poses from this T_world_cam0 TUM trajectory (e.g. an RTAB-Map run's "
+                         "trajectory.tum), interpolated at the same keyframe images: compares pose sources "
+                         "with the depth pipeline held fixed")
     args = ap.parse_args()
 
     run = args.run_dir.resolve()
@@ -91,8 +113,13 @@ def main():
     if match_err_ms > 5:
         raise SystemExit(f"keyframe/frame timestamp mismatch up to {match_err_ms:.1f} ms")
 
+    if args.gt_poses and args.poses_tum:
+        raise SystemExit("--gt-poses and --poses-tum are exclusive")
     if args.gt_poses:
         T_wc, keep = gt_keyframe_poses(run, stamps[idx])
+        kfs, idx = kfs[keep].reset_index(drop=True), idx[keep]
+    elif args.poses_tum:
+        T_wc, keep = tum_poses(args.poses_tum.resolve(), stamps[idx])
         kfs, idx = kfs[keep].reset_index(drop=True), idx[keep]
     else:
         T_wc = np.array([pose_matrix(r) for r in kfs.itertuples()])
@@ -137,6 +164,9 @@ def main():
     cpu_s, wall_s = time.process_time() - cpu0, time.perf_counter() - wall0
     o3d.io.write_triangle_mesh(str(out / "mesh.ply"), mesh)
     o3d.io.write_point_cloud(str(out / "cloud.ply"), cloud)
+    q = Rotation.from_matrix(T_wc[:, :3, :3]).as_quat()
+    pd.DataFrame({"timestamp_ns": stamps[idx], "tx": T_wc[:, 0, 3], "ty": T_wc[:, 1, 3], "tz": T_wc[:, 2, 3],
+                  "qx": q[:, 0], "qy": q[:, 1], "qz": q[:, 2], "qw": q[:, 3]}).to_csv(out / "poses.csv", index=False)
 
     # Consistency: distance from each sparse map point (triangulated / bundle-adjusted by ORB-SLAM3)
     # to the fused surface, for points inside the depth range of some keyframe (ORB-SLAM3 poses only;
@@ -144,7 +174,7 @@ def main():
     mp = pd.read_csv(alg / "map_points.csv")
     mp = mp[mp.in_final_frame == 1][["x", "y", "z"]].to_numpy()
     sparse_check = None
-    if not args.gt_poses:
+    if not (args.gt_poses or args.poses_tum):
         scene = o3d.t.geometry.RaycastingScene()
         scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
         kf_pos = T_wc[:, :3, 3]
@@ -158,7 +188,8 @@ def main():
     ms = lambda a: {"mean": 1e3 * float(np.mean(a)), "p95": 1e3 * float(np.percentile(a, 95))}
     stats = {
         "run_dir": str(run), "n_keyframes": int(len(idx)), "voxel_m": args.voxel, "max_depth_m": args.max_depth,
-        "pose_source": "ground_truth" if args.gt_poses else "orbslam3",
+        "pose_source": ("ground_truth" if args.gt_poses else
+                        f"tum:{args.poses_tum.resolve()}" if args.poses_tum else "orbslam3"),
         "sgbm": {"num_disparities": args.num_disp, "block_size": args.block, "uniqueness_ratio": args.uniqueness},
         "valid_depth_pixel_fraction_mean": float(np.mean(valid_frac)),
         "per_keyframe_ms": {"image_load": ms(t_load), "stereo_depth": ms(t_depth), "tsdf_integrate": ms(t_fuse)},
