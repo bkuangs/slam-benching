@@ -122,6 +122,21 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   `not_localized`. `extra.map_reuse` records the map database hash before/after (the run fails if
   it changed) and `map_frame_check`, which compares the loaded node poses with the mapping run's
   final graph (the run fails unless they are identical, since evaluation relies on that frame).
+  LAC SLAM (`lac`, stereo, needs a CUDA GPU: `apptainer exec --nv`) writes `sparse_map_ply`
+  (`map_points.ply`: `Backend.project_point_map()`, each frame's newly tracked stereo SuperPoint
+  points at that frame's final pose, with a `label` property), `loop_closures` (`loop_closures.csv`)
+  and `frame_log`. Its tracking states are `init`, `vo`, `vo_failed_identity` (PnP failed; LAC
+  then uses identity odometry with its IMU noise model, so the pose repeats) and `reinitialized`
+  (feature tracking raised and was restarted on that frame); only `init`/`vo` count as tracking OK.
+  `extra.gpu` records the GPU and peak GPU memory, `extra.frontend_time_s` / `backend_time_s` the
+  per-frame times of VO and of the pose-graph update (incl. loop closure + optimization).
+  `extra.image_load_time_s` is the per-frame time to read and decode both PNGs (not included in
+  the frame time), `extra.stereo_filter` the effective stereo-match filters and
+  `extra.n_vo_reference_switches` how often keyframe-referenced VO took a new reference. Settings
+  beyond LAC's: `cpu_threads` (OMP/MKL threads, default 1), `max_depth_m` / `min_disparity_px` /
+  `max_row_diff_px` (stereo filters, null = LAC) and `vo_reference` (`previous` = LAC
+  frame-to-frame PnP, `keyframe` = PnP against a kept reference frame, with `vo_ref_max_flow_px`
+  and `vo_ref_min_match_frac`); see `docs/results/lac_lunapolaris.md`.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

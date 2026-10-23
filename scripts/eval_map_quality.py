@@ -16,6 +16,8 @@ Estimated maps evaluated (each if present):
   rtab_octomap       RTAB-Map OctoMap occupied cell centres (rtabmap_octomap.ply, free cells removed)
   lio_map            FAST-LIO voxel map (fastlio_map.ply; built from the same Livox scans as the reference,
                      but placed with FAST-LIO's own poses instead of motion capture)
+  lac_points         LAC SLAM stereo SuperPoint points (map_points.ply = Backend.project_point_map(): each
+                     frame's newly tracked stereo points placed at that frame's final pose)
 Each is moved into the ground-truth world from the sensor poses it was built from (keyframes, nodes, a
 dense dir's poses.csv, or FAST-LIO's per-scan LiDAR poses against ground truth in the LiDAR frame), in two ways, so trajectory errors show up as map errors:
   aligned_by_trajectory   SE3 best aligning those camera positions to ground truth (as ATE does); a
@@ -33,6 +35,7 @@ Metrics (slambench/evaluation/map_quality.py), all maps voxelised to --voxel fir
   recall_all@tau recall over every reference voxel (not only camera-visible ones), e.g. for LiDAR maps
 
 Usage: python scripts/eval_map_quality.py --orb <orbslam3 run> --rtab <rtabmap run> [--lio <fastlio run>]
+                                          [--lac <lac run>]
                                           [--dense-dir dense ...]
 Needs open3d.
 """
@@ -134,7 +137,7 @@ def read_ply_points(path: Path):
     return np.asarray(pc.points), (np.asarray(pc.colors) if pc.has_colors() else None)
 
 
-def load_maps(orb: Path, rtab: Path, lio: Path, dense_dirs, voxel):
+def load_maps(orb: Path, rtab: Path, lio: Path, dense_dirs, voxel, lac: Path = None):
     """name -> (points, trajectory) where trajectory = (t_ns, positions, quaternions xyzw[, sensor frame])
     of the sensor poses the map was built from (camera unless a frame is given), or None if the map is
     already in the ground-truth world."""
@@ -188,6 +191,16 @@ def load_maps(orb: Path, rtab: Path, lio: Path, dense_dirs, voxel):
             maps["lio_map"] = (read_ply_points(p)[0], (*traj_of(log), "lidar"))
         else:
             print(f"  skip {p} (missing)")
+    if lac:
+        final = pd.read_csv(lac / "algorithm" / "trajectory_final.csv")
+        log = pd.read_csv(lac / "algorithm" / "frame_log.csv")
+        # align on frames whose visual odometry succeeded (failures repeat the previous pose)
+        final = final[final.timestamp_ns.isin(log.timestamp_ns[log.state.isin([0, 1])])]
+        p = lac / "algorithm" / "map_points.ply"
+        if p.exists():
+            maps["lac_points"] = (read_ply_points(p)[0], traj_of(final))
+        else:
+            print(f"  skip {p} (missing)")
     return maps
 
 
@@ -211,6 +224,7 @@ def main():
     ap.add_argument("--orb", type=Path, help="ORB-SLAM3 run directory")
     ap.add_argument("--rtab", type=Path, help="RTAB-Map run directory (with dense export)")
     ap.add_argument("--lio", type=Path, help="FAST-LIO run directory (fastlio_map.ply)")
+    ap.add_argument("--lac", type=Path, help="LAC SLAM run directory (map_points.ply)")
     ap.add_argument("--dense-dir", action="append", default=None,
                     help="dense_from_keyframes.py output dir(s) inside the ORB-SLAM3 run (default: dense)")
     ap.add_argument("--out", type=Path, default=Path("~/scratch/slam-bench-work/map_quality").expanduser())
@@ -222,10 +236,10 @@ def main():
     ap.add_argument("--max-depth", type=float, default=5.0, help="camera depth counted as visible (m)")
     ap.add_argument("--taus", type=float, nargs="+", default=[0.05, 0.10])
     args = ap.parse_args()
-    if not (args.orb or args.rtab or args.lio):
-        ap.error("give --orb, --rtab and/or --lio")
+    if not (args.orb or args.rtab or args.lio or args.lac):
+        ap.error("give --orb, --rtab, --lio and/or --lac")
     dense_dirs = args.dense_dir or ["dense"]
-    runs = [r.resolve() for r in (args.orb, args.rtab, args.lio) if r]
+    runs = [r.resolve() for r in (args.orb, args.rtab, args.lio, args.lac) if r]
     ad = adapter_for(runs[0])
     seq = yaml.safe_load((runs[0] / "config.resolved.yaml").read_text())["dataset"]["sequence"]
     out = args.out / seq
@@ -261,11 +275,13 @@ def main():
     results = {"sequence": seq, "orb_run": str(args.orb.resolve()) if args.orb else None,
                "rtab_run": str(args.rtab.resolve()) if args.rtab else None,
                "lio_run": str(args.lio.resolve()) if args.lio else None,
+               "lac_run": str(args.lac.resolve()) if args.lac else None,
                "reference": ref_info, "visible_fraction": float(vis.mean()), "maps": {}}
     aligned = {}
     all_ref = np.ones(len(ref), bool)
     for name, (raw, traj) in load_maps(args.orb and args.orb.resolve(), args.rtab and args.rtab.resolve(),
-                                       args.lio and args.lio.resolve(), dense_dirs, args.voxel).items():
+                                       args.lio and args.lio.resolve(), dense_dirs, args.voxel,
+                                       args.lac and args.lac.resolve()).items():
         entry = {}
         if traj is not None:
             t_ns, pos, quat = traj[:3]

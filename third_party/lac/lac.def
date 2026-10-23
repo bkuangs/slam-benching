@@ -1,0 +1,73 @@
+Bootstrap: docker
+# pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime (Ubuntu 22.04, Python 3.10, torch 2.3.1, torchvision).
+# The tag can be rebuilt upstream, so pin the amd64 digest.
+From: pytorch/pytorch@sha256:fc47f8018254e6df30f48c48f2db1c758d44de21a8c553de1a1c451a65baa70a
+
+# Stanford NAV Lab Lunar Autonomy Challenge (LAC) SLAM stack, pinned build for slam-benching.
+# Build with third_party/lac/build_container.sh (wraps `apptainer build --fakeroot`).
+# Run with `apptainer exec --nv` on a CUDA GPU (LAC hard-codes .cuda()).
+# Versions resolved inside the image are written to /opt/slambench/versions.txt.
+
+%files
+    slambench_lac_driver.py /opt/slambench/slambench_lac_driver.py
+    stubs /opt/slambench/stubs
+
+%environment
+    export PYTHONPATH=/opt/lac:/opt/slambench/stubs
+    export TORCH_HOME=/opt/torch_home
+    export PYTHONUNBUFFERED=1
+    export MPLBACKEND=Agg
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    LAC_COMMIT=26c3a2b2a7407e0b2d2e8e28f7cb074961c23f36        # Stanford-NavLab/lunar_autonomy_challenge
+    LIGHTGLUE_COMMIT=eb42fee2d71449efb0aa5c10549752b5d75384d8  # cvg/LightGlue main
+    BASE_DIGEST=sha256:fc47f8018254e6df30f48c48f2db1c758d44de21a8c553de1a1c451a65baa70a
+
+    apt-get update
+    apt-get install -y --no-install-recommends git ca-certificates libgl1 libglib2.0-0
+    rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir \
+        numpy==1.26.4 scipy==1.13.1 opencv-python-headless==4.10.0.84 gtsam==4.2 \
+        kornia==0.7.3 rich==13.7.1 tqdm==4.66.4 matplotlib==3.8.4 plotly==5.22.0 \
+        munch==4.0.0 opt_einsum==3.3.0 pillow==10.3.0
+    pip install --no-cache-dir --no-deps "git+https://github.com/cvg/LightGlue.git@${LIGHTGLUE_COMMIT}"
+
+    git clone https://github.com/Stanford-NavLab/lunar_autonomy_challenge.git /opt/lac
+    git -C /opt/lac checkout ${LAC_COMMIT}
+
+    # Pre-download SuperPoint / LightGlue weights so runs need no network.
+    export TORCH_HOME=/opt/torch_home
+    mkdir -p "$TORCH_HOME"
+    python -c "from lightglue import LightGlue, SuperPoint; SuperPoint(max_num_keypoints=2048); LightGlue(features='superpoint')"
+    chmod -R a+rX "$TORCH_HOME" /opt/lac /opt/slambench
+
+    # Import smoke test of everything the driver loads (CPU only at build time).
+    PYTHONPATH=/opt/lac:/opt/slambench/stubs python -c "
+import sys; sys.argv=['x']
+sys.path.insert(0, '/opt/slambench')
+import slambench_lac_driver as d
+d.patch_lac_params({'width': 640, 'height': 360, 'fx': 262.0, 'fy': 262.0, 'cx': 320.0, 'cy': 180.0, 'baseline_m': 0.12})
+import lac.slam.semantic_feature_tracker, lac.slam.backend, lac.params as P
+assert P.FL_X == 262.0 and lac.slam.feature_tracker.FL_X == 262.0
+assert lac.slam.feature_tracker.STEREO_BASELINE == 0.12
+import lac.perception.vision as V; assert V.solve_vision_pnp.__defaults__[0][0, 2] == 320.0
+"
+    {
+      echo "lac_commit=$(git -C /opt/lac rev-parse HEAD)"
+      echo "lightglue_commit=${LIGHTGLUE_COMMIT}"
+      echo "driver_source_sha1=$(cat /opt/slambench/slambench_lac_driver.py $(cd /opt/slambench && LC_ALL=C ls stubs/*/__init__.py | sed 's|^|/opt/slambench/|') | sha1sum | cut -c1-40)"
+      echo "base_image=pytorch/pytorch@${BASE_DIGEST} (2.3.1-cuda12.1-cudnn8-runtime)"
+      python -c "import torch, gtsam, cv2, numpy, kornia; print(f'torch={torch.__version__}'); print(f'torch_cuda={torch.version.cuda}'); print(f'gtsam={getattr(gtsam, \"__version__\", \"4.2\")}'); print(f'opencv={cv2.__version__}'); print(f'numpy={numpy.__version__}'); print(f'kornia={kornia.__version__}')"
+      echo "python=$(python -c 'import platform; print(platform.python_version())')"
+      echo "weights_sha256=$(cd $TORCH_HOME && find . -type f -name '*.pth' | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)"
+      echo "base_os=$(. /etc/os-release && echo $PRETTY_NAME)"
+    } > /opt/slambench/versions.txt
+    cat /opt/slambench/versions.txt
+
+%test
+    test -f /opt/lac/lac/slam/backend.py
+    test -f /opt/slambench/slambench_lac_driver.py
+    cat /opt/slambench/versions.txt

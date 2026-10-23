@@ -25,11 +25,13 @@ slambench/
               orbslam3.py             ORB-SLAM3 via Apptainer image
               rtabmap.py              RTAB-Map 0.23.8 (stereo) via Apptainer image; also exports maps
               fastlio.py              FAST-LIO2 (LiDAR-inertial) via Apptainer image; voxel map export
+              lac.py                  Stanford LAC SLAM (SuperPoint/LightGlue stereo VO + GTSAM), GPU image
   runner.py, config.py, cli.py        experiment execution, YAML configs, CLI
   evaluation/ metrics.py, evaluate.py, plots.py, summary.py
 third_party/orbslam3/                 pinned container definition, headless driver, patch
 third_party/rtabmap/                  pinned container definition, headless stereo driver
 third_party/fastlio/                  pinned container definition, offline-input patch for laserMapping
+third_party/lac/                      pinned container definition, offline Python driver for the LAC stack
 configs/                              example experiment and batch configs
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
 scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calibration + GT
@@ -59,6 +61,10 @@ sbatch -p ice-cpu -c 16 --mem=48G -t 03:00:00 --constraint=gold6226 third_party/
 #    FAST-LIO2 image (hku-mars/FAST_LIO 7cc4175 on the pinned ros:noetic-perception digest; optional):
 sbatch -p ice-cpu -c 8 --mem=16G -t 01:30:00 --constraint=gold6226 third_party/fastlio/build_container.sh
 #    -> ~/scratch/slam-bench-work/containers/fastlio_7cc4175.sif
+#    LAC SLAM image (Stanford-NavLab/lunar_autonomy_challenge 26c3a2b on pinned pytorch 2.3.1/CUDA 12.1;
+#    optional; runs need a GPU node, e.g. sbatch -p ice-gpu --gres=gpu:v100:1 ...):
+sbatch -p ice-cpu -c 8 --mem=32G -t 01:30:00 third_party/lac/build_container.sh
+#    -> ~/scratch/slam-bench-work/containers/lac_26c3a2b.sif
 
 # 3. Data
 #    LunaPolaris sequence_01 (33.8 GB, Zenodo record 15737938) -> ~/scratch/LunaPolaris/sequence_01/
@@ -165,9 +171,13 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
 * `docs/datasets/lunapolaris.md` — verified LunaPolaris topics, timestamps, calibration, frames.
 * `docs/datasets/subtmrs.md` — SubT-MRS SmokeRoom layout, MEI→pinhole conversion, extrinsics, GT.
 * `docs/results/milestone1.md` — what ran, what was verified, blockers.
+* `docs/results/lac_lunapolaris.md` — LAC SLAM (SuperPoint/LightGlue + GTSAM) vs ORB-SLAM3,
+  RTAB-Map and FAST-LIO2 on seq01/02/11: accuracy, resources, map quality, drift diagnosis.
 
 ## Licences
 LunaPolaris: CC BY 4.0, © 2025 University of Luxembourg — Database by Dave van der Meer,
 SnT – SpaceR. ORB-SLAM3: GPLv3 (built inside the container, not redistributed here). RTAB-Map: BSD-3-Clause
 (built inside the container). FAST-LIO: GPLv2 (built inside the container; only a patch is kept here).
+LAC (Stanford NAV Lab): MIT; LightGlue: Apache-2.0; SuperPoint weights: Magic Leap non-commercial
+licence (all fetched inside the container, not redistributed here).
 TUM-VI: CC BY 4.0. SubT-MRS: CC BY 4.0 (AirLab, CMU).
