@@ -62,6 +62,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "lc_distance_threshold_m": 1.0,
     "lc_angle_threshold_deg": 5.0,
     "max_frames": None,            # debugging: process only the first N frames
+    # feed every Nth prepared frame (diagnostic: N-times larger inter-frame motion at the same scene);
+    # implemented in the adapter (run-local frames.csv + links to the prepared images), not the driver
+    "frame_stride": 1,
     # OMP/MKL threads inside the container; None = library default (one per core, which
     # spins ~7 cores for no latency gain on the frontend, see docs/results/lac_lunapolaris.md)
     "cpu_threads": 1,
@@ -146,7 +149,7 @@ class LacAdapter(AlgorithmAdapter):
                 raise ValueError(f"{k} must be > 0, got {out[k]}")
         if not 0 <= float(out["lc_min_score"]) <= 1:
             raise ValueError(f"lc_min_score must be in [0, 1], got {out['lc_min_score']}")
-        for k in ("lc_min_matches", "max_frames", "cpu_threads"):
+        for k in ("lc_min_matches", "max_frames", "cpu_threads", "frame_stride"):
             v = out[k]
             if v is None and k in ("max_frames", "cpu_threads"):
                 continue
@@ -251,15 +254,35 @@ class LacAdapter(AlgorithmAdapter):
                    "min_match_frac": float(s["vo_ref_min_match_frac"])},
         }
 
+    def _stride(self, ctx: RunContext) -> int:
+        return int(ctx.settings.get("frame_stride") or 1)
+
+    def input_dir(self, ctx: RunContext) -> Path:
+        """Directory handed to the driver: the prepared input, or a strided view of it."""
+        return ctx.prepared.directory if self._stride(ctx) == 1 else ctx.algo_dir / "input"
+
+    def _write_strided_input(self, ctx: RunContext) -> None:
+        n, src, dst = self._stride(ctx), ctx.prepared.directory.resolve(), self.input_dir(ctx)
+        dst.mkdir(parents=True, exist_ok=True)
+        for p in src.iterdir():
+            if p.is_dir() and not (dst / p.name).exists():
+                (dst / p.name).symlink_to(p.resolve())
+        with open(src / "frames.csv") as f:
+            lines = f.read().splitlines()
+        (dst / "frames.csv").write_text("\n".join([lines[0]] + lines[1::n]) + "\n")
+
     def prepare(self, ctx: RunContext) -> None:
         ctx.algo_dir.mkdir(parents=True, exist_ok=True)
+        if self._stride(ctx) > 1:
+            self._write_strided_input(ctx)
         (ctx.algo_dir / "lac_settings.json").write_text(json.dumps(self.driver_settings(ctx), indent=2))
 
     def _binds(self, ctx: RunContext) -> List[str]:
         paths = {ctx.prepared.directory.resolve(), ctx.algo_dir.resolve()}
-        for p in ctx.prepared.directory.iterdir():
-            if p.is_symlink():
-                paths.add(p.resolve())
+        for d in {ctx.prepared.directory, self.input_dir(ctx)}:
+            for p in d.iterdir():
+                if p.is_symlink():
+                    paths.add(p.resolve())
         out = []
         for p in sorted(paths):
             if not any(str(p).startswith(str(q) + os.sep) for q in paths if q != p):
@@ -275,7 +298,7 @@ class LacAdapter(AlgorithmAdapter):
             cmd += ["-B", b]
         return cmd + [str(self.container), "python", DRIVER,
                       str((ctx.algo_dir / "lac_settings.json").resolve()),
-                      str(ctx.prepared.directory.resolve()), str(ctx.algo_dir.resolve())]
+                      str(self.input_dir(ctx).resolve()), str(ctx.algo_dir.resolve())]
 
     # ---- outputs -----------------------------------------------------------
     @staticmethod
@@ -322,7 +345,7 @@ class LacAdapter(AlgorithmAdapter):
 
     def collect(self, ctx: RunContext, returncode: Optional[int], timed_out: bool) -> AlgorithmOutput:
         d = ctx.algo_dir
-        frames_ts = np.loadtxt(ctx.prepared.frames_csv, delimiter=",", skiprows=1, usecols=0,
+        frames_ts = np.loadtxt(self.input_dir(ctx) / "frames.csv", delimiter=",", skiprows=1, usecols=0,
                                dtype=np.int64, ndmin=1)
         extra: Dict[str, Any] = {}
         driver_status: Dict[str, Any] = {}
@@ -349,6 +372,7 @@ class LacAdapter(AlgorithmAdapter):
                     "p95": float(np.percentile(v, 95)), "max": float(np.max(v)), "sum": float(np.sum(v))}
 
         extra.update({"n_frame_log_rows_malformed": n_malformed, "n_frames_input": int(len(frames_ts)),
+                      "frame_stride": self._stride(ctx),
                       "n_frames_logged": len(rows), "n_frames_tracking_ok": n_ok, "state_counts": states,
                       "n_keyframes": sum(1 for r in rows if r["keyframe"]),
                       "n_loop_closures": rows[-1]["n_loop_closures"] if rows else 0,

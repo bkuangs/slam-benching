@@ -73,7 +73,8 @@ def test_registered_and_rejects_bad_modes_settings(tmp_path):
     for bad in ({"nope": 1}, {"keyframe_interval_s": 0}, {"lc_min_matches": 0}, {"lc_min_score": 2},
                 {"max_frames": 1.5}, {"playback_rate": -1}, {"cpu_threads": 0},
                 {"max_depth_m": 0}, {"min_disparity_px": -1}, {"max_row_diff_px": 0},
-                {"vo_reference": "map"}, {"vo_ref_max_flow_px": 0}, {"vo_ref_min_match_frac": 1.5}):
+                {"vo_reference": "map"}, {"vo_ref_max_flow_px": 0}, {"vo_ref_min_match_frac": 1.5},
+                {"frame_stride": 0}, {"frame_stride": 1.5}):
         with pytest.raises(ValueError):
             a.resolve_settings(bad)
     assert a.resolve_settings({"max_frames": 5})["max_frames"] == 5
@@ -121,6 +122,24 @@ def test_collect_success(tmp_path):
         rows = list(csv.DictReader(f))
     assert rows[5]["tracking_state"] == "vo_failed_identity" and rows[5]["tracking_ok"] == "0"
     assert rows[7]["tracking_ok"] == "1" and rows[7]["in_final_trajectory"] == "1"
+
+
+def test_frame_stride_input_view(tmp_path):
+    a, ds, ctx = _ctx(tmp_path, {"frame_stride": 3})
+    a.prepare(ctx)
+    inp = ctx.algo_dir / "input"
+    rows = (inp / "frames.csv").read_text().splitlines()
+    src = (ctx.prepared.directory / "frames.csv").read_text().splitlines()
+    assert rows[0] == src[0] and rows[1:] == src[1::3]
+    for d in (p for p in ctx.prepared.directory.iterdir() if p.is_dir()):
+        assert (inp / d.name).is_symlink() and (inp / d.name).resolve() == d.resolve()
+    cmd = a.command(ctx)
+    assert cmd[-2] == str(inp.resolve())
+    # unstrided runs still read the prepared input directly
+    (tmp_path / "s1run").mkdir()
+    a1, _, ctx1 = _ctx(tmp_path / "s1run")
+    a1.prepare(ctx1)
+    assert a1.command(ctx1)[-2] == str(ctx1.prepared.directory.resolve()) and not (ctx1.algo_dir / "input").exists()
 
 
 def test_collect_failures(tmp_path):
