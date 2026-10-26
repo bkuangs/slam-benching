@@ -1,0 +1,33 @@
+# ORB-SLAM3 stereo on the OmniLRS Lunalab replay of LunaPolaris seq01 (first 60 s, no rocks), rendered by
+# sim/omnilrs/render_stereo.py. Same estimator settings as lunapolaris_seq01_orbslam3_stereo.yaml.
+name: omnilrs_seq01_60s_orbslam3_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: seq01_60s_norocks
+
+algorithm:
+  name: orbslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif
+  settings:
+    orb_n_features: 1200
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

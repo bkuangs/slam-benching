@@ -19,6 +19,7 @@ slambench/
               lunapolaris.py          ROS 2 bag adapter (rosbags, no ROS install needed)
               tumvi.py                TUM-VI (EuRoC/ASL export) adapter, used for installation checks
               subtmrs.py              SubT-MRS folder release (SmokeRoom; MEI -> virtual pinhole, mono only)
+              omnilrs.py              OmniLRS/Isaac Sim rendered stereo sequences (exact calibration + GT)
   viz/        rerun_export.py         run directory -> Rerun replay (.rrd)
               map_reuse_export.py     replay of a localization run in the saved map's fixed frame
   algorithms/ base.py                 AlgorithmAdapter interface + normalized diagnostics columns
@@ -32,6 +33,7 @@ third_party/orbslam3/                 pinned container definition, headless driv
 third_party/rtabmap/                  pinned container definition, headless stereo driver
 third_party/fastlio/                  pinned container definition, offline-input patch for laserMapping
 third_party/lac/                      pinned container definition, offline Python driver for the LAC stack
+sim/omnilrs/                          render LunaPolaris trajectories in the OmniLRS Lunalab (Isaac Sim, GPU)
 configs/                              example experiment and batch configs
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
 scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calibration + GT
@@ -170,6 +172,7 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
 * `docs/evaluation.md` — association, frames, alignment, ATE/RPE, coverage, timing.
 * `docs/datasets/lunapolaris.md` — verified LunaPolaris topics, timestamps, calibration, frames.
 * `docs/datasets/subtmrs.md` — SubT-MRS SmokeRoom layout, MEI→pinhole conversion, extrinsics, GT.
+* `docs/datasets/omnilrs.md` — simulated Lunalab stereo: PACE/Isaac Sim setup, render pipeline, layout.
 * `docs/results/milestone1.md` — what ran, what was verified, blockers.
 * `docs/results/lac_lunapolaris.md` — LAC SLAM (SuperPoint/LightGlue + GTSAM) vs ORB-SLAM3,
   RTAB-Map and FAST-LIO2 on seq01/02/11: accuracy, resources, map quality, drift diagnosis.
@@ -180,4 +183,5 @@ SnT – SpaceR. ORB-SLAM3: GPLv3 (built inside the container, not redistributed 
 (built inside the container). FAST-LIO: GPLv2 (built inside the container; only a patch is kept here).
 LAC (Stanford NAV Lab): MIT; LightGlue: Apache-2.0; SuperPoint weights: Magic Leap non-commercial
 licence (all fetched inside the container, not redistributed here).
-TUM-VI: CC BY 4.0. SubT-MRS: CC BY 4.0 (AirLab, CMU).
+TUM-VI: CC BY 4.0. SubT-MRS: CC BY 4.0 (AirLab, CMU). OmniLRS: BSD-3-Clause; Isaac Sim: NVIDIA licence
+(container pulled from NGC, not redistributed here).
