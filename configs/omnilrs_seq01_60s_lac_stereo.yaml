@@ -1,0 +1,34 @@
+# LAC SLAM (previous-referenced VO) on the OmniLRS Lunalab replay of LunaPolaris seq01 (first 60 s, no rocks).
+# Exact calibration and GT: tests whether LAC's ~4% motion underestimate on the real recordings also
+# appears in simulation. Same LAC settings as lunapolaris_seq01_lac_stereo.yaml. Needs a CUDA GPU:
+#   sbatch -p coc-gpu --gres=gpu:v100:1 scripts/slurm_slambench.sbatch run configs/omnilrs_seq01_60s_lac_stereo.yaml
+name: omnilrs_seq01_60s_lac_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: seq01_60s_norocks
+
+algorithm:
+  name: lac
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/lac_26c3a2b.sif
+  settings:
+    playback_rate: 1.0
+    keyframe_interval_s: 1.0
+    loop_closure: true
+    vo_reference: previous
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}
