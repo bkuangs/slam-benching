@@ -153,6 +153,30 @@ back to 640 px.
 Open causes are real-image effects on matching: sensor noise, the repetitive gravel texture, and
 exposure. A next step is adding noise and gravel-like texture to the simulator renders.
 
+### Feature swap: ORB inside LAC
+
+`features: orb` replaces SuperPoint + LightGlue with OpenCV ORB (512 keypoints, 8 levels) and
+brute-force Hamming matching (ratio 0.8, mutual check). The rest of LAC is unchanged. Configs:
+`lunapolaris_seq{01,11}_lac_stereo_kfvo_orb.yaml` (V100).
+
+| Seq | Features | ATE (m) | ATE rot (deg) | RPE 1 s trans (m) | RPE 1 m rot (deg) | Loop closures | Frame time (ms) |
+|---|---|---|---|---|---|---|---|
+| 01 | SuperPoint + LightGlue | 0.162 | 5.1 | 0.0146 | 3.1 | — | 88 |
+| 01 | ORB | 1.821 | 51.8 | 0.0148 | 14.3 | 276 | 54 |
+| 11 | SuperPoint + LightGlue | 0.168 | 4.1 | 0.0091 | 2.9 | — | 84 |
+| 11 | ORB | 1.243 | 38.1 | 0.0149 | 11.7 | 7 | 45 |
+
+Baseline ORB-SLAM3 lean, for reference: ATE 0.031 / 0.087 m; RPE 1 m rot 2.9 / 2.8 deg.
+
+Inside LAC's pipeline, ORB is about 10× worse, mainly from rotational drift. Tracking never failed.
+
+So SuperPoint + LightGlue is the better front end for LAC. Yet ORB-SLAM3 gets 5× lower ATE than
+LAC using ORB features, so LAC's gap is in the rest of its pipeline, not its choice of features:
+no sub-pixel stereo refinement, a 512-keypoint budget, and thresholds tuned for LightGlue.
+
+Caveat: ORB match scores (1 − Hamming/256) easily pass LAC's loop-closure `min_score` of 0.5.
+This is a likely source of false closures on seq01. The ORB front end was not tuned.
+
 ## Resource usage
 
 | Seq | Method | Frame time mean / p95 (ms) | Frontend median (ms) | Backend median / max | Image load median (ms) | CPU per frame (ms) | CPU per s of data | Mid-run cores | Peak RSS (MB) | Peak GPU mem (GiB) | Wall / data duration |

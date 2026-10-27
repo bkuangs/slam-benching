@@ -74,7 +74,7 @@ def test_registered_and_rejects_bad_modes_settings(tmp_path):
                 {"max_frames": 1.5}, {"playback_rate": -1}, {"cpu_threads": 0},
                 {"max_depth_m": 0}, {"min_disparity_px": -1}, {"max_row_diff_px": 0},
                 {"vo_reference": "map"}, {"vo_ref_max_flow_px": 0}, {"vo_ref_min_match_frac": 1.5},
-                {"frame_stride": 0}, {"frame_stride": 1.5}):
+                {"frame_stride": 0}, {"frame_stride": 1.5}, {"features": "sift"}, {"orb_n_features": 0}):
         with pytest.raises(ValueError):
             a.resolve_settings(bad)
     assert a.resolve_settings({"max_frames": 5})["max_frames"] == 5
@@ -93,6 +93,7 @@ def test_driver_settings_and_command(tmp_path):
     assert p["playback_rate"] == 0.0 and p["keyframe_interval_s"] == 1.0
     assert p["stereo"] == {"max_depth_m": None, "min_disparity_px": None, "max_row_diff_px": None}
     assert p["vo"] == {"reference": "previous", "max_flow_px": 10.0, "min_match_frac": 0.5}
+    assert p["features"] == {"type": "superpoint"}
     assert p["loop_closure"] == {"enabled": False, "min_score": 0.5, "min_matches": 100,
                                  "distance_threshold_m": 1.0, "angle_threshold_deg": 5.0}
     cmd = a.command(ctx)
@@ -216,3 +217,24 @@ def test_driver_reference_switch():
 
     fp = d.FramePoints(np.zeros((4, 3)), np.array([3, 3, 3, 3]), np.array([0, 2]))
     assert fp.lengths.tolist() == [1, 0, 1, 0]
+
+
+def test_driver_orb_features_and_matching():
+    torch = pytest.importorskip("torch")
+    cv2 = pytest.importorskip("cv2")
+    d = _driver()
+    rng = np.random.default_rng(0)
+    img = cv2.GaussianBlur((rng.random((240, 320)) * 255).astype(np.uint8), (3, 3), 0)
+    f1 = d.orb_features(img, 300, 7, 8, 1.2)
+    n = f1["keypoints"].shape[1]
+    assert 50 < n <= 300 and f1["descriptors"].shape == (1, n, 32) and f1["descriptors"].dtype == torch.uint8
+    assert f1["keypoint_scores"].shape == (1, n) and f1["image_size"].tolist() == [[320, 240]]
+    shifted = np.roll(img, 5, axis=1)                      # pure 5 px horizontal shift
+    f2 = d.orb_features(shifted, 300, 7, 8, 1.2)
+    m, sc = d.orb_match(f1, f2, 0.8, 100)
+    assert m.dtype == torch.int64 and m.shape[1] == 2 and len(m) > 30 and len(sc) == len(m)
+    flow = f2["keypoints"][0][m[:, 1]] - f1["keypoints"][0][m[:, 0]]
+    assert float(torch.median(flow[:, 0])) == pytest.approx(5.0, abs=0.5)
+    assert float(torch.median(flow[:, 1].abs())) < 0.5 and bool(((sc > 0) & (sc <= 1)).all())
+    empty = d.orb_features(np.zeros((60, 80), np.uint8), 100, 7, 8, 1.2)
+    assert empty["keypoints"].shape == (1, 0, 2) and len(d.orb_match(empty, f1, 0.8, 100)[0]) == 0

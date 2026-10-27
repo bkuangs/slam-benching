@@ -20,7 +20,11 @@ loop mirrors lac.slam.frontend.Frontend.process_frame with these differences (se
 * optional keyframe-referenced VO (settings "vo": reference "keyframe"): PnP against a reference
   frame that is kept until the keypoints moved max_flow_px or lost too many matches, instead of
   LAC's frame-to-frame PnP ("previous", the default). Map points: as LAC, each frame's stereo points
-  that matched no tracked point.
+  that matched no tracked point;
+* optional ORB features (settings "features": type "orb"): FeatureTracker.extract_feats /
+  match_feats use OpenCV ORB with brute-force Hamming matching (Lowe ratio + mutual check) instead
+  of SuperPoint + LightGlue, with the same feature dict / match tensor layout, so everything else
+  (stereo, PnP, keyframes, loop closures, backend) is unchanged ("superpoint", the default = LAC).
 
 Usage: slambench_lac_driver.py SETTINGS_JSON PREPARED_DIR OUT_DIR
 
@@ -111,6 +115,87 @@ def install_stereo_filter(cfg: dict) -> dict:
         return feats_left, feats_right, matches, depths
 
     F.FeatureTracker.process_stereo = process_stereo
+    return eff
+
+
+ORB_DESC_BITS = 256
+
+
+def orb_features(image: np.ndarray, n_features: int, fast_threshold: int, n_levels: int,
+                 scale_factor: float, device="cpu") -> dict:
+    """OpenCV ORB keypoints/descriptors in the LightGlue feature-dict layout (batch dimension 1):
+    keypoints (1, N, 2) float, keypoint_scores (1, N) (FAST/Harris response), descriptors
+    (1, N, 32) uint8, image_size (1, 2) [w, h]."""
+    import cv2
+    import torch
+    orb = cv2.ORB_create(nfeatures=int(n_features), scaleFactor=float(scale_factor), nlevels=int(n_levels),
+                         fastThreshold=int(fast_threshold))
+    kps, des = orb.detectAndCompute(image, None)
+    if des is None or not kps:
+        kp, sc, des = np.zeros((0, 2), np.float32), np.zeros(0, np.float32), np.zeros((0, 32), np.uint8)
+    else:
+        kp = np.array([k.pt for k in kps], np.float32)
+        sc = np.array([k.response for k in kps], np.float32)
+    h, w = image.shape[:2]
+    return {"keypoints": torch.from_numpy(kp)[None].to(device),
+            "keypoint_scores": torch.from_numpy(sc)[None].to(device),
+            "descriptors": torch.from_numpy(np.ascontiguousarray(des))[None].to(device),
+            "image_size": torch.tensor([[w, h]], dtype=torch.float32, device=device)}
+
+
+def orb_match(feats1: dict, feats2: dict, ratio: float, max_distance: int):
+    """Brute-force Hamming matches between two ORB feature dicts: Lowe ratio test, mutual nearest
+    neighbours and a maximum distance. Returns (matches (M, 2) int64 tensor on the keypoints'
+    device, scores (M,) = 1 - distance / 256, LightGlue-like: higher is better)."""
+    import cv2
+    import torch
+    dev = feats1["keypoints"].device
+    d1 = feats1["descriptors"][0].cpu().numpy()
+    d2 = feats2["descriptors"][0].cpu().numpy()
+    empty = (torch.zeros((0, 2), dtype=torch.int64, device=dev), torch.zeros(0, device=dev))
+    if len(d1) < 2 or len(d2) < 2:
+        return empty
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    fwd = bf.knnMatch(d1, d2, k=2)
+    back = {m.queryIdx: m.trainIdx for m in bf.match(d2, d1)}
+    out = [(m.queryIdx, m.trainIdx, m.distance) for m, n in (p for p in fwd if len(p) == 2)
+           if m.distance < ratio * n.distance and m.distance <= max_distance and back.get(m.trainIdx) == m.queryIdx]
+    if not out:
+        return empty
+    a = np.array(out)
+    return (torch.from_numpy(a[:, :2].astype(np.int64)).to(dev),
+            torch.from_numpy((1.0 - a[:, 2] / ORB_DESC_BITS).astype(np.float32)).to(dev))
+
+
+def install_feature_frontend(cfg: dict) -> dict:
+    """features.type "orb": replace FeatureTracker.extract_feats / match_feats (same signatures and
+    outputs) with orb_features / orb_match. Returns the effective settings."""
+    eff = {"type": cfg.get("type", "superpoint")}
+    if eff["type"] == "superpoint":
+        return eff
+    if eff["type"] != "orb":
+        raise ValueError(f"unknown features.type {eff['type']!r}")
+    import torch
+    import lac.slam.feature_tracker as F
+    eff.update(n_features=int(cfg.get("n_features", 512)), fast_threshold=int(cfg.get("fast_threshold", 7)),
+               n_levels=int(cfg.get("n_levels", 8)), scale_factor=float(cfg.get("scale_factor", 1.2)),
+               ratio=float(cfg.get("ratio", 0.8)), max_distance=int(cfg.get("max_distance", 100)))
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def extract_feats(self, image, min_score=None, max_keypoints=None):  # noqa: ARG001 - as LAC
+        return orb_features(image, eff["n_features"], eff["fast_threshold"], eff["n_levels"],
+                            eff["scale_factor"], dev)
+
+    def match_feats(self, feats1, feats2, max_matches=None, min_score=None):
+        m, sc = orb_match(feats1, feats2, eff["ratio"], eff["max_distance"])
+        if min_score is not None:
+            m, sc = m[sc > min_score], sc[sc > min_score]
+        if max_matches is not None and len(m) > max_matches:
+            m = m[torch.topk(sc, int(max_matches)).indices]
+        return m
+
+    F.FeatureTracker.extract_feats = extract_feats
+    F.FeatureTracker.match_feats = match_feats
     return eff
 
 
@@ -224,6 +309,7 @@ def main(argv) -> int:
     from gtsam.symbol_shorthand import X
 
     status["stereo_filter"] = install_stereo_filter(settings.get("stereo") or {})
+    status["features"] = install_feature_frontend(settings.get("features") or {})
 
     torch.set_grad_enabled(False)
     if not torch.cuda.is_available():

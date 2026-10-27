@@ -79,6 +79,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "vo_reference": "previous",
     "vo_ref_max_flow_px": 10.0,
     "vo_ref_min_match_frac": 0.5,
+    # "superpoint" = LAC (SuperPoint + LightGlue); "orb" = OpenCV ORB + brute-force Hamming matching
+    # (ratio test, mutual check) in the same pipeline, to isolate the feature type
+    "features": "superpoint",
+    "orb_n_features": 512,         # LAC's SuperPoint keypoint budget (EXTRACTOR_MAX_KEYPOINTS)
+    "orb_fast_threshold": 7,       # ORB-SLAM3's fallback FAST threshold (low-texture floor)
 }
 
 
@@ -149,7 +154,10 @@ class LacAdapter(AlgorithmAdapter):
                 raise ValueError(f"{k} must be > 0, got {out[k]}")
         if not 0 <= float(out["lc_min_score"]) <= 1:
             raise ValueError(f"lc_min_score must be in [0, 1], got {out['lc_min_score']}")
-        for k in ("lc_min_matches", "max_frames", "cpu_threads", "frame_stride"):
+        if out["features"] not in ("superpoint", "orb"):
+            raise ValueError(f"features must be 'superpoint' or 'orb', got {out['features']!r}")
+        for k in ("lc_min_matches", "max_frames", "cpu_threads", "frame_stride", "orb_n_features",
+                  "orb_fast_threshold"):
             v = out[k]
             if v is None and k in ("max_frames", "cpu_threads"):
                 continue
@@ -252,6 +260,9 @@ class LacAdapter(AlgorithmAdapter):
                        for k in ("max_depth_m", "min_disparity_px", "max_row_diff_px")},
             "vo": {"reference": s["vo_reference"], "max_flow_px": float(s["vo_ref_max_flow_px"]),
                    "min_match_frac": float(s["vo_ref_min_match_frac"])},
+            "features": ({"type": "orb", "n_features": int(s["orb_n_features"]),
+                          "fast_threshold": int(s["orb_fast_threshold"])}
+                         if s["features"] == "orb" else {"type": "superpoint"}),
         }
 
     def _stride(self, ctx: RunContext) -> int:

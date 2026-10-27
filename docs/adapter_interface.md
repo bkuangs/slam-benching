@@ -136,8 +136,41 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   beyond LAC's: `cpu_threads` (OMP/MKL threads, default 1), `max_depth_m` / `min_disparity_px` /
   `max_row_diff_px` (stereo filters, null = LAC) and `vo_reference` (`previous` = LAC
   frame-to-frame PnP, `keyframe` = PnP against a kept reference frame, with `vo_ref_max_flow_px`
-  and `vo_ref_min_match_frac`), and `frame_stride` (diagnostic: feed every Nth frame through a
-  run-local `algorithm/input/` view); see `docs/results/lac_lunapolaris.md`.
+  and `vo_ref_min_match_frac`), `frame_stride` (diagnostic: feed every Nth frame through a
+  run-local `algorithm/input/` view), and `features` (`superpoint` = LAC; `orb` = OpenCV ORB +
+  brute-force Hamming matching in the same pipeline, `orb_n_features`, `orb_fast_threshold`);
+  see `docs/results/lac_lunapolaris.md`.
+  SP_SLAM3 (`spslam3`, stereo only, needs a CUDA GPU: `apptainer exec --nv`) is ORB-SLAM3 with
+  SuperPoint keypoints/descriptors, an L2 descriptor matcher, LightGlue frame-to-frame matching and
+  a DBoW3 SuperPoint vocabulary (fthbng77/SP_SLAM3 9439971, a fork of pre-v1.0 ORB-SLAM3). The
+  adapter subclasses the ORB-SLAM3 adapter and its driver is a port of the ORB-SLAM3 driver, so the
+  outputs, tracking states and diagnostics are the same, except that there is no
+  `place_recognition.csv`. Its patches (`third_party/spslam3/patches/`) re-add what the driver
+  needs: map id / map-origin info, outlier flags and the sparse-map export (0001), the SuperPoint
+  model path (0002) and a guard for stereo frames without matches (0003). Two SuperPoint fixes:
+  0004 replaces upstream's keypoint NMS (it indexed the unpadded confidence map with padded
+  coordinates, so ~95% of keypoints came in clusters of adjacent pixels whose near-identical
+  descriptors fail every nearest-neighbour ratio test; on LunaPolaris tracking was lost on every
+  frame after initialisation) with greedy NMS in confidence order (radius 4 px, as in the reference
+  SuperPoint); 0005 reads the probability map without a `Tensor::item()` call per candidate pixel
+  (same keypoints, needed for low thresholds). The settings file uses the old ORB-SLAM3 format
+  (`Camera.bf`, `ThDepth`). Settings: `sp_n_features` (default 1200), `sp_n_levels` (1, SP_SLAM3's
+  recommendation), `sp_scale_factor`, `sp_ini_th` / `sp_min_th` (SuperPoint confidence thresholds,
+  written to `ORBextractor.iniThFAST` / `minThFAST`; defaults 0.155 / 0.055 from the SP_SLAM3
+  README, but those leave ~40 keypoints per LunaPolaris frame, below the 500 needed for stereo
+  initialisation, so the LunaPolaris configs use 1e-5 / 1e-6, which fills the same 1200-keypoint
+  budget as ORB-SLAM3), `sp_fp16`, `lightglue` / `lightglue_fp16`, `stereo_th_depth`, `camera_fps`,
+  `clahe*`, `playback_rate`, `log_features`. Loop closing always runs in SP_SLAM3, so only
+  `loop_closure: true` is accepted. The LightGlue TorchScript model is exported when the image is
+  built (`third_party/spslam3/export_lightglue_slambench.py`, traced on the CPU with device-neutral
+  replacements for two LightGlue helpers, then checked against the eager model).
+  `driver_status.json` records `cuda_available` (without a GPU, SP_SLAM3 silently runs SuperPoint
+  and LightGlue on the CPU), and `version_info` records the host GPUs. The image puts its own
+  system libraries ahead of `/.singularity.d/libs` (the host's glvnd libEGL bound by `--nv` needs a
+  newer glibc than Ubuntu 20.04) and adds the unhashed `libnvrtc-builtins.so.12.1` that the
+  TorchScript fuser loads at run time. LunaPolaris (V100, `lunapolaris_seq{01,11}_spslam3_stereo`):
+  ATE 0.050 / 0.091 m against ORB-SLAM3 lean's 0.031 / 0.081 m. Tracking held for every frame in a
+  single map, at a mean of 0.11–0.13 s per frame (about 4–5× slower than ORB-SLAM3).
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory
