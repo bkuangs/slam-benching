@@ -1,0 +1,25 @@
+diff --git a/src/SPextractor.cc b/src/SPextractor.cc
+index 6843b96..d3b7bfb 100644
+--- a/src/SPextractor.cc
++++ b/src/SPextractor.cc
+@@ -3,6 +3,8 @@
+ #include <opencv2/features2d/features2d.hpp>
+ #include <opencv2/imgproc/imgproc.hpp>
+ #include <vector>
++#include <cstdlib>
++#include <string>
+ 
+ #include "SPextractor.h"
+ #include "SuperPoint.h"
+@@ -88,7 +90,10 @@ SPextractor::SPextractor(int _nfeatures, float _scaleFactor, int _nlevels,
+     torch::Device load_device = torch::cuda::is_available() ? torch::kCUDA : torch::kCPU;
+     {
+         std::lock_guard<std::mutex> lock(LightGlue::getInferenceMutex());
+-        torch::load(model, "superpoint.pt", load_device);
++        // slam-benching patch: model path from SPSLAM3_SUPERPOINT_MODEL (upstream: ./superpoint.pt).
++        const char* envModel = std::getenv("SPSLAM3_SUPERPOINT_MODEL");
++        const std::string modelPath = (envModel && *envModel) ? envModel : "superpoint.pt";
++        torch::load(model, modelPath, load_device);
+         model->to(load_device);
+         model->eval();
+     }

@@ -1,0 +1,14 @@
+diff --git a/src/Frame.cc b/src/Frame.cc
+index f776fba..e4b233a 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -944,6 +944,9 @@ void Frame::ComputeStereoMatches()
+         }
+     }
+ 
++    // slam-benching patch: no stereo match at all (upstream indexes the empty vector).
++    if(vDistIdx.empty())
++        return;
+     sort(vDistIdx.begin(),vDistIdx.end());
+     const float median = vDistIdx[vDistIdx.size()/2].first;
+     const float thDist = 1.5f*1.4f*median;

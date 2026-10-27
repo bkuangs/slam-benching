@@ -1,0 +1,135 @@
+diff --git a/include/System.h b/include/System.h
+index 35caaac..499b7d3 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -168,6 +168,24 @@ public:
+     // Information from most recent processed frame
+     // You can call this right after TrackMonocular (or stereo or RGBD)
+     int GetTrackingState();
++    // slam-benching patch: identity of the active map's coordinate frame (see slambench driver):
++    // it changes when the active Map object changes or when the origin keyframe moves.
++    struct MapFrameInfo {
++        const void* map = nullptr;      // active Map object
++        long unsigned int map_id = 0;
++        bool has_origin = false;        // false until the map has a keyframe
++        long unsigned int origin_kf_id = 0;
++        float t_w_origin[3] = {0.f, 0.f, 0.f};
++        float q_w_origin[4] = {0.f, 0.f, 0.f, 1.f};   // x, y, z, w
++        long unsigned int n_keyframes = 0;   // size of the active map
++        long unsigned int n_map_points = 0;
++    };
++    MapFrameInfo GetCurrentMapFrameInfo();
++    // slam-benching patch: Frame::mvbOutlier of the most recently tracked frame.
++    std::vector<unsigned char> GetTrackedOutlierFlags();
++    // slam-benching patch: write map_points.csv / keyframes.csv of every atlas map to dir; the map
++    // SaveTrajectoryEuRoC exports is expressed in that trajectory's world frame (in_final_frame=1).
++    bool SaveSparseMapSlambench(const std::string &dir);
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+diff --git a/src/System.cc b/src/System.cc
+index 0215f08..ea7b191 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -825,6 +825,101 @@ void System::SaveDebugData(const int &initIdx)
+ }
+ 
+ 
++System::MapFrameInfo System::GetCurrentMapFrameInfo()
++{
++    MapFrameInfo info;
++    Map* pMap = mpAtlas->GetCurrentMap();
++    if(!pMap)
++        return info;
++    info.map = pMap;
++    info.map_id = pMap->GetId();
++    info.n_keyframes = pMap->KeyFramesInMap();
++    info.n_map_points = pMap->MapPointsInMap();
++    if(info.n_keyframes > 0)
++    {
++        KeyFrame* pKF = pMap->GetOriginKF();
++        if(pKF)
++        {
++            const cv::Mat Twc = pKF->GetPoseInverse();
++            const vector<float> q = Converter::toQuaternion(Twc.rowRange(0,3).colRange(0,3));
++            info.has_origin = true;
++            info.origin_kf_id = pKF->mnId;
++            for(int i=0; i<3; i++)
++                info.t_w_origin[i] = Twc.at<float>(i,3);
++            for(int i=0; i<4; i++)
++                info.q_w_origin[i] = q[i];
++        }
++    }
++    return info;
++}
++
++std::vector<unsigned char> System::GetTrackedOutlierFlags()
++{
++    // Tracking runs in the caller's thread, so mCurrentFrame is the frame just tracked.
++    const std::vector<bool> &out = mpTracker->mCurrentFrame.mvbOutlier;
++    return std::vector<unsigned char>(out.begin(), out.end());
++}
++
++bool System::SaveSparseMapSlambench(const std::string &dir)
++{
++    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
++    // Same map choice and world reference as SaveTrajectoryEuRoC (first map with the most keyframes).
++    Map* pBiggerMap = nullptr;
++    size_t numMaxKFs = 0;
++    for(Map* pMap : vpMaps)
++    {
++        if(pMap->GetAllKeyFrames().size() > numMaxKFs)
++        {
++            numMaxKFs = pMap->GetAllKeyFrames().size();
++            pBiggerMap = pMap;
++        }
++    }
++    cv::Mat Tfw = cv::Mat::eye(4,4,CV_32F);  // final-trajectory world <- map world
++    if(pBiggerMap)
++    {
++        vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
++        sort(vpKFs.begin(), vpKFs.end(), KeyFrame::lId);
++        cv::Mat Twb;
++        if (mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO)
++            Twb = vpKFs[0]->GetImuPose();
++        else
++            Twb = vpKFs[0]->GetPoseInverse();
++        Tfw = Twb.inv();
++    }
++    ofstream fp((dir + "/map_points.csv").c_str());
++    ofstream fk((dir + "/keyframes.csv").c_str());
++    if(!fp.is_open() || !fk.is_open())
++        return false;
++    fp << "map_id,point_id,x,y,z,n_observations,in_final_frame\n" << fixed << setprecision(6);
++    fk << "map_id,keyframe_id,timestamp_ns,tx,ty,tz,qx,qy,qz,qw,in_final_frame\n" << fixed;
++    const cv::Mat I = cv::Mat::eye(4,4,CV_32F);
++    for(Map* pMap : vpMaps)
++    {
++        const bool inFinal = (pMap == pBiggerMap);
++        const cv::Mat T = inFinal ? Tfw : I;
++        const cv::Mat R = T.rowRange(0,3).colRange(0,3), t = T.rowRange(0,3).col(3);
++        for(MapPoint* pMP : pMap->GetAllMapPoints())
++        {
++            if(!pMP || pMP->isBad())
++                continue;
++            const cv::Mat p = R * pMP->GetWorldPos() + t;
++            fp << pMap->GetId() << "," << pMP->mnId << "," << p.at<float>(0) << "," << p.at<float>(1) << ","
++               << p.at<float>(2) << "," << pMP->Observations() << "," << (inFinal ? 1 : 0) << "\n";
++        }
++        for(KeyFrame* pKF : pMap->GetAllKeyFrames())
++        {
++            if(!pKF || pKF->isBad())
++                continue;
++            const cv::Mat Twc = T * pKF->GetPoseInverse();
++            const vector<float> q = Converter::toQuaternion(Twc.rowRange(0,3).colRange(0,3));
++            fk << pMap->GetId() << "," << pKF->mnId << "," << setprecision(0) << 1e9 * pKF->mTimeStamp << ","
++               << setprecision(9) << Twc.at<float>(0,3) << "," << Twc.at<float>(1,3) << "," << Twc.at<float>(2,3)
++               << "," << q[0] << "," << q[1] << "," << q[2] << "," << q[3] << "," << (inFinal ? 1 : 0) << "\n";
++        }
++    }
++    return true;
++}
++
+ int System::GetTrackingState()
+ {
+     unique_lock<mutex> lock(mMutexState);

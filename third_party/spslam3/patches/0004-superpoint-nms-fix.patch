@@ -1,0 +1,103 @@
+diff --git a/src/SuperPoint.cc b/src/SuperPoint.cc
+index 6aefb3f..1c638b8 100644
+--- a/src/SuperPoint.cc
++++ b/src/SuperPoint.cc
+@@ -277,79 +277,27 @@ void SPDetector::computeDescriptors(const std::vector<cv::KeyPoint> &keypoints,
+ void NMS2(std::vector<cv::KeyPoint> det, cv::Mat conf, std::vector<cv::KeyPoint>& pts,
+             int border, int dist_thresh, int img_width, int img_height)
+ {
+-
+-    std::vector<cv::Point2f> pts_raw;
+-
+-    for (int i = 0; i < det.size(); i++){
+-
+-        int u = (int) det[i].pt.x;
+-        int v = (int) det[i].pt.y;
+-
+-        pts_raw.push_back(cv::Point2f(u, v));
+-    }
+-
+-    cv::Mat grid = cv::Mat(cv::Size(img_width, img_height), CV_8UC1);
+-    cv::Mat inds = cv::Mat(cv::Size(img_width, img_height), CV_16UC1);
+-
+-    cv::Mat confidence = cv::Mat(cv::Size(img_width, img_height), CV_32FC1);
+-
+-    grid.setTo(0);
+-    inds.setTo(0);
+-    confidence.setTo(0);
+-
+-    for (int i = 0; i < pts_raw.size(); i++)
+-    {   
+-        int uu = (int) pts_raw[i].x;
+-        int vv = (int) pts_raw[i].y;
+-
+-        grid.at<char>(vv, uu) = 1;
+-        inds.at<unsigned short>(vv, uu) = i;
+-
+-        confidence.at<float>(vv, uu) = conf.at<float>(i, 0);
+-    }
+-    
+-    cv::copyMakeBorder(grid, grid, dist_thresh, dist_thresh, dist_thresh, dist_thresh, cv::BORDER_CONSTANT, 0);
+-
+-    for (int i = 0; i < pts_raw.size(); i++)
+-    {   
+-        int uu = (int) pts_raw[i].x + dist_thresh;
+-        int vv = (int) pts_raw[i].y + dist_thresh;
+-
+-        if (grid.at<char>(vv, uu) != 1)
++    // slam-benching patch: greedy non-maximum suppression in descending confidence order (as in the
++    // reference SuperPoint implementation). Upstream padded only the occupancy grid but indexed the
++    // unpadded confidence map with padded coordinates (and visited points in raster order), so
++    // suppression compared against shifted values and left clusters of adjacent duplicates whose
++    // near-identical descriptors then fail every nearest-neighbour ratio test.
++    std::vector<int> order(det.size());
++    for (size_t i = 0; i < order.size(); i++) order[i] = (int)i;
++    std::stable_sort(order.begin(), order.end(),
++                     [&conf](int a, int b) { return conf.at<float>(a, 0) > conf.at<float>(b, 0); });
++
++    cv::Mat suppressed = cv::Mat::zeros(img_height + 2 * dist_thresh, img_width + 2 * dist_thresh, CV_8UC1);
++    for (int i : order)
++    {
++        const int u = (int) det[i].pt.x;
++        const int v = (int) det[i].pt.y;
++        if (u < border || u >= img_width - border || v < border || v >= img_height - border)
+             continue;
+-
+-        for(int k = -dist_thresh; k < (dist_thresh+1); k++)
+-            for(int j = -dist_thresh; j < (dist_thresh+1); j++)
+-            {
+-                if(j==0 && k==0) continue;
+-
+-                if ( confidence.at<float>(vv + k, uu + j) < confidence.at<float>(vv, uu) )
+-                    grid.at<char>(vv + k, uu + j) = 0;
+-                
+-            }
+-        grid.at<char>(vv, uu) = 2;
+-    }
+-
+-    size_t valid_cnt = 0;
+-    std::vector<int> select_indice;
+-
+-    for (int v = 0; v < (img_height + dist_thresh); v++){
+-        for (int u = 0; u < (img_width + dist_thresh); u++)
+-        {
+-            if (u -dist_thresh>= (img_width - border) || u-dist_thresh < border || v-dist_thresh >= (img_height - border) || v-dist_thresh < border)
++        if (suppressed.at<uchar>(v + dist_thresh, u + dist_thresh))
+             continue;
+-
+-            if (grid.at<char>(v,u) == 2)
+-            {
+-                int select_ind = (int) inds.at<unsigned short>(v-dist_thresh, u-dist_thresh);
+-                cv::Point2f p = pts_raw[select_ind];
+-                float response = conf.at<float>(select_ind, 0);
+-                pts.push_back(cv::KeyPoint(p, 8.0f, -1, response));
+-
+-                select_indice.push_back(select_ind);
+-                valid_cnt++;
+-            }
+-        }
++        suppressed(cv::Rect(u, v, 2 * dist_thresh + 1, 2 * dist_thresh + 1)).setTo(1);
++        pts.push_back(cv::KeyPoint(cv::Point2f(u, v), 8.0f, -1, conf.at<float>(i, 0)));
+     }
+ }
+ 

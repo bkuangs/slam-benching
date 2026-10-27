@@ -1,0 +1,49 @@
+# SP_SLAM3 (ORB-SLAM3 with SuperPoint features + LightGlue) stereo on LunaPolaris sequence_01: same
+# input and evaluation as lunapolaris_seq01_orbslam3_stereo_lean.yaml (same keypoint budget, ThDepth
+# and loop closing), so the two runs differ in the feature front end. Needs a CUDA GPU, e.g.
+#   sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 scripts/slurm_slambench.sbatch run <this file>
+name: lunapolaris_seq01_spslam3_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work      # prepared (converted) inputs are cached under work_dir/prepared
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris               # contains sequence_01/{metadata.yaml,sequence_01.db3}
+  sequence: sequence_01
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose   # consistent with /tf_static (see docs)
+
+algorithm:
+  name: spslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/spslam3_9439971.sif
+  settings:
+    sp_n_features: 1200          # = orb_n_features of the ORB-SLAM3 lean config
+    sp_n_levels: 1               # SuperPoint on the full-resolution image only (SP_SLAM3 recommendation)
+    # SuperPoint confidence thresholds. The SP_SLAM3 README values (0.155 / 0.055, the adapter
+    # defaults) leave ~40 keypoints per LunaPolaris frame (low-texture regolith; ~90 even at 0.005),
+    # far below the 500 that stereo initialisation needs, so tracking never starts. These thresholds
+    # fill the same 1200-keypoint budget as ORB-SLAM3 (top-1200 NMS'd heatmap maxima, spread by the
+    # oct-tree); see docs/adapter_interface.md.
+    sp_ini_th: 0.00001
+    sp_min_th: 0.000001
+    sp_fp16: false
+    lightglue: true
+    lightglue_fp16: false
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3                 # metric stereo -> rigid alignment
+  association_max_dt_s: 0.02     # mocap ~30 Hz (33 ms period); nearest sample within 20 ms
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

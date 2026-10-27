@@ -27,13 +27,15 @@ slambench/
               rtabmap.py              RTAB-Map 0.23.8 (stereo) via Apptainer image; also exports maps
               fastlio.py              FAST-LIO2 (LiDAR-inertial) via Apptainer image; voxel map export
               lac.py                  Stanford LAC SLAM (SuperPoint/LightGlue stereo VO + GTSAM), GPU image
+              spslam3.py              SP_SLAM3 (ORB-SLAM3 + SuperPoint/LightGlue, stereo), GPU image
   runner.py, config.py, cli.py        experiment execution, YAML configs, CLI
   evaluation/ metrics.py, evaluate.py, plots.py, summary.py
 third_party/orbslam3/                 pinned container definition, headless driver, patch
 third_party/rtabmap/                  pinned container definition, headless stereo driver
 third_party/fastlio/                  pinned container definition, offline-input patch for laserMapping
 third_party/lac/                      pinned container definition, offline Python driver for the LAC stack
-sim/omnilrs/                          render LunaPolaris trajectories in the OmniLRS Lunalab (Isaac Sim, GPU)
+third_party/spslam3/                  pinned container definition, headless driver (port of ORB-SLAM3's), patches
+sim/omnilrs/                          render LunaPolaris trajectories in the OmniLRS Lunalab, aerial surveys in the Lunaryard (Isaac Sim)
 configs/                              example experiment and batch configs
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
 scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calibration + GT
@@ -69,6 +71,10 @@ sbatch -p ice-cpu -c 8 --mem=16G -t 01:30:00 --constraint=gold6226 third_party/f
 #    optional; runs need a GPU node, e.g. sbatch -p ice-gpu --gres=gpu:v100:1 ...):
 sbatch -p ice-cpu -c 8 --mem=32G -t 01:30:00 third_party/lac/build_container.sh
 #    -> ~/scratch/slam-bench-work/containers/lac_26c3a2b.sif
+#    SP_SLAM3 image (fthbng77/SP_SLAM3 9439971, LibTorch 2.3.0+cu121, Ubuntu 20.04; optional; runs need
+#    a CUDA GPU node, e.g. sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 ...):
+sbatch -p ice-cpu -c 8 --mem=32G -t 02:00:00 third_party/spslam3/build_container.sh
+#    -> ~/scratch/slam-bench-work/containers/spslam3_9439971.sif
 
 # 3. Data
 #    LunaPolaris sequence_01 (33.8 GB, Zenodo record 15737938) -> ~/scratch/LunaPolaris/sequence_01/
@@ -174,16 +180,21 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
 * `docs/evaluation.md` — association, frames, alignment, ATE/RPE, coverage, timing.
 * `docs/datasets/lunapolaris.md` — verified LunaPolaris topics, timestamps, calibration, frames.
 * `docs/datasets/subtmrs.md` — SubT-MRS SmokeRoom layout, MEI→pinhole conversion, extrinsics, GT.
-* `docs/datasets/omnilrs.md` — simulated Lunalab stereo: PACE/Isaac Sim setup, render pipeline, layout.
+* `docs/datasets/omnilrs.md` — simulated Lunalab stereo: PACE/Isaac Sim setup, render pipeline, layout;
+  aerial Lunaryard lighting sweep.
 * `docs/results/milestone1.md` — what ran, what was verified, blockers.
 * `docs/results/lac_lunapolaris.md` — LAC SLAM (SuperPoint/LightGlue + GTSAM) vs ORB-SLAM3,
   RTAB-Map and FAST-LIO2 on seq01/02/11: accuracy, resources, map quality, drift diagnosis.
+* `docs/results/lunaryard_aerial_lighting.md` — simulated drone survey over the Lunaryard under 4 lightings:
+  ORB-SLAM3 vs SP_SLAM3 vs LAC.
 
 ## Licences
 LunaPolaris: CC BY 4.0, © 2025 University of Luxembourg — Database by Dave van der Meer,
 SnT – SpaceR. ORB-SLAM3: GPLv3 (built inside the container, not redistributed here). RTAB-Map: BSD-3-Clause
 (built inside the container). FAST-LIO: GPLv2 (built inside the container; only a patch is kept here).
 LAC (Stanford NAV Lab): MIT; LightGlue: Apache-2.0; SuperPoint weights: Magic Leap non-commercial
-licence (all fetched inside the container, not redistributed here).
+licence (all fetched inside the container, not redistributed here). SP_SLAM3: GPLv3 (ORB-SLAM3
+derivative; built inside the container, only patches are kept here; its SuperPoint and LightGlue
+weights are under the licences above).
 TUM-VI: CC BY 4.0. SubT-MRS: CC BY 4.0 (AirLab, CMU). OmniLRS: BSD-3-Clause; Isaac Sim: NVIDIA licence
 (container pulled from NGC, not redistributed here).

@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.10)
+project(slambench_spslam3_driver CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=x86-64")
+
+set(SPSLAM3_ROOT "/opt/SP_SLAM3" CACHE PATH "SP_SLAM3 source/build root")
+include(${CMAKE_CURRENT_SOURCE_DIR}/TorchNoToolkit.cmake)
+find_package(OpenCV 4.2 REQUIRED)
+find_package(Eigen3 3.1.0 REQUIRED)
+find_package(Pangolin REQUIRED)
+
+add_executable(spslam3_driver slambench_spslam3_driver.cc)
+target_include_directories(spslam3_driver PRIVATE
+    ${SPSLAM3_ROOT}
+    ${SPSLAM3_ROOT}/include
+    ${SPSLAM3_ROOT}/include/CameraModels
+    ${SPSLAM3_ROOT}/Thirdparty/Sophus
+    ${EIGEN3_INCLUDE_DIR}
+    ${Pangolin_INCLUDE_DIRS})
+target_link_libraries(spslam3_driver
+    ${SPSLAM3_ROOT}/lib/libORB_SLAM3.so
+    ${SPSLAM3_ROOT}/Thirdparty/DBoW3/lib/libDBoW3.so
+    ${SPSLAM3_ROOT}/Thirdparty/g2o/lib/libg2o.so
+    ${TORCH_LIBRARIES}
+    ${OpenCV_LIBS} ${Pangolin_LIBRARIES} -lboost_serialization -lcrypto pthread)

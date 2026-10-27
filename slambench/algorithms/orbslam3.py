@@ -94,6 +94,7 @@ def _matrix(name: str, M: np.ndarray) -> str:
 
 class OrbSlam3Adapter(AlgorithmAdapter):
     name = "orbslam3"
+    estimator_label = "ORB-SLAM3"   # Trajectory meta "estimator" written by collect()
     supported_modes = frozenset({SensorMode.MONO, SensorMode.MONO_INERTIAL,
                                  SensorMode.STEREO, SensorMode.STEREO_INERTIAL})
 
@@ -363,7 +364,7 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             P = np.array([r["pose"] for r in online])
             otraj = Trajectory(np.array([r["timestamp_ns"] for r in online], dtype=np.int64), P[:, :3], P[:, 3:],
                                frame="cam0",
-                               meta={"source": str(d / "frame_log.csv"), "estimator": "ORB-SLAM3",
+                               meta={"source": str(d / "frame_log.csv"), "estimator": self.estimator_label,
                                      "content": "online pose returned by Track*() immediately after each "
                                                 "frame, tracking-OK frames only; camera frame; expressed "
                                                 "in the map active at that moment (see map_id)"})
@@ -389,7 +390,7 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 final_problem = f"final trajectory timestamps do not match input frames (max {err.max()} ns)"
             else:
                 traj = Trajectory(best, data[:, 1:4], data[:, 4:8], frame=self.estimate_frame(ctx.mode),
-                                  meta={"source": str(raw), "estimator": "ORB-SLAM3",
+                                  meta={"source": str(raw), "estimator": self.estimator_label,
                                         "content": "final optimized poses, largest map, non-LOST frames"})
                 traj_path = ctx.run_dir / "trajectory.tum"
                 write_tum(traj, traj_path)

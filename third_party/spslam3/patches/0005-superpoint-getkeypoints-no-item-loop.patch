@@ -1,0 +1,49 @@
+diff --git a/src/SuperPoint.cc b/src/SuperPoint.cc
+index 1c638b8..c066cb6 100644
+--- a/src/SuperPoint.cc
++++ b/src/SuperPoint.cc
+@@ -210,25 +210,30 @@ void SPDetector::detect(cv::Mat &img, bool use_cuda)
+ 
+ void SPDetector::getKeyPoints(float threshold, int iniX, int maxX, int iniY, int maxY, std::vector<cv::KeyPoint> &keypoints, bool nms)
+ {
+-    auto prob = mProb.slice(0, iniY, maxY).slice(1, iniX, maxX);  // [h, w]
+-    auto kpts = (prob > threshold);
+-    kpts = torch::nonzero(kpts);  // [n_keypoints, 2]  (y, x)
++    // slam-benching patch: read the probability map (CPU, contiguous float32, see detect()) through a
++    // cv::Mat header instead of several Tensor::item() calls per candidate pixel. Same keypoints in the
++    // same (row-major) order, but cheap at the low thresholds needed on low-texture imagery.
++    cv::Mat probMat((int)mProb.size(0), (int)mProb.size(1), CV_32F, mProb.data_ptr<float>());
++    maxX = std::min(maxX, probMat.cols);
++    maxY = std::min(maxY, probMat.rows);
++    if (iniX >= maxX || iniY >= maxY)
++        return;
++    const cv::Mat prob = probMat(cv::Range(iniY, maxY), cv::Range(iniX, maxX));
+ 
+     std::vector<cv::KeyPoint> keypoints_no_nms;
+-    for (int i = 0; i < kpts.size(0); i++) {
+-        float response = prob[kpts[i][0]][kpts[i][1]].item<float>();
+-        keypoints_no_nms.push_back(cv::KeyPoint(kpts[i][1].item<float>(), kpts[i][0].item<float>(), 8, -1, response));
++    std::vector<float> responses;
++    for (int y = 0; y < prob.rows; y++) {
++        const float* row = prob.ptr<float>(y);
++        for (int x = 0; x < prob.cols; x++) {
++            if (row[x] > threshold) {
++                keypoints_no_nms.push_back(cv::KeyPoint((float)x, (float)y, 8, -1, row[x]));
++                responses.push_back(row[x]);
++            }
++        }
+     }
+ 
+     if (nms) {
+-        cv::Mat conf(keypoints_no_nms.size(), 1, CV_32F);
+-        for (size_t i = 0; i < keypoints_no_nms.size(); i++) {
+-            int x = keypoints_no_nms[i].pt.x;
+-            int y = keypoints_no_nms[i].pt.y;
+-            conf.at<float>(i, 0) = prob[y][x].item<float>();
+-        }
+-
+-        // cv::Mat descriptors;
++        cv::Mat conf((int)responses.size(), 1, CV_32F, responses.data());
+ 
+         int border = 0;
+         int dist_thresh = 4;

@@ -1,0 +1,138 @@
+Bootstrap: docker
+From: ubuntu:20.04
+
+# SP_SLAM3 (ORB-SLAM3 fork with SuperPoint features, L2 SPmatcher, LightGlue, DBoW3) pinned build
+# for slam-benching. Build with third_party/spslam3/build_container.sh (wraps
+# `apptainer build --fakeroot`); run with `apptainer exec --nv` on a CUDA GPU (SuperPoint and
+# LightGlue fall back to the CPU without one, which is far slower than real time).
+# Versions resolved inside the image are written to /opt/slambench/versions.txt.
+
+%files
+    slambench_spslam3_driver.cc /opt/slambench/src/slambench_spslam3_driver.cc
+    ../orbslam3/slambench_preprocess.h /opt/slambench/src/slambench_preprocess.h
+    CMakeLists.driver.txt /opt/slambench/src/CMakeLists.txt
+    TorchNoToolkit.cmake /opt/slambench/src/TorchNoToolkit.cmake
+    export_lightglue_slambench.py /opt/slambench/src/export_lightglue_slambench.py
+    patches /opt/slambench/patches
+
+%environment
+    # /usr/lib/x86_64-linux-gnu comes before ${LD_LIBRARY_PATH} (which holds /.singularity.d/libs under
+    # --nv): the host's glvnd libEGL/libGLdispatch bound there need a newer glibc than Ubuntu 20.04's;
+    # the NVIDIA driver libraries (libcuda, ...) only exist in /.singularity.d/libs and still resolve.
+    export LD_LIBRARY_PATH=/opt/SP_SLAM3/lib:/opt/SP_SLAM3/Thirdparty/DBoW3/lib:/opt/SP_SLAM3/Thirdparty/g2o/lib:/opt/libtorch/lib:/usr/local/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+    export SPSLAM3_SUPERPOINT_MODEL=/opt/SP_SLAM3/superpoint.pt
+    export SPSLAM3_VOCABULARY=/opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3
+    export SPSLAM3_LIGHTGLUE_MODEL=/opt/SP_SLAM3/lightglue.pt
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    SPSLAM3_COMMIT=9439971f73f571a06d55bee0c1f0bd2541a381cb     # fthbng77/SP_SLAM3
+    LIGHTGLUE_COMMIT=5a650c444718caffc2669dc0094cde908f42dd73   # cvg/LightGlue (export only)
+    LIBTORCH_URL=https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.3.0%2Bcu121.zip
+    PANGOLIN_TAG=v0.6
+    JOBS=${SLAMBENCH_BUILD_JOBS:-8}
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential cmake git git-lfs ca-certificates pkg-config wget unzip \
+        libeigen3-dev libopencv-dev libboost-serialization-dev libssl-dev \
+        libglew-dev libgl1-mesa-dev libegl1-mesa-dev libepoxy-dev libwayland-dev libxkbcommon-dev \
+        wayland-protocols python3 python3-venv
+    rm -rf /var/lib/apt/lists/*
+
+    mkdir -p /opt/src && cd /opt/src
+    git clone https://github.com/stevenlovegrove/Pangolin.git
+    cd Pangolin && git checkout ${PANGOLIN_TAG}
+    mkdir build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_PANGOLIN_PYTHON=OFF
+    make -j${JOBS} && make install && ldconfig
+    cd /opt/src && rm -rf Pangolin/build
+
+    # LibTorch (CUDA 12.1 userspace bundled; needs an NVIDIA driver >= 530 at run time).
+    wget -q -O /opt/src/libtorch.zip "${LIBTORCH_URL}"
+    unzip -q /opt/src/libtorch.zip -d /opt && rm /opt/src/libtorch.zip
+    # The TorchScript fuser (LightGlue) JIT-compiles CUDA kernels with nvrtc, which dlopens the
+    # unhashed libnvrtc-builtins.so.<cuda>; LibTorch only ships the hashed copy.
+    NVRTC_BUILTINS=$(cd /opt/libtorch/lib && ls libnvrtc-builtins-*.so.* | head -n1)
+    ln -s "${NVRTC_BUILTINS}" "/opt/libtorch/lib/libnvrtc-builtins.so.${NVRTC_BUILTINS##*.so.}"
+
+    git lfs install --system
+    git clone https://github.com/fthbng77/SP_SLAM3.git /opt/SP_SLAM3
+    cd /opt/SP_SLAM3 && git checkout ${SPSLAM3_COMMIT} && git lfs pull
+    for p in /opt/slambench/patches/*.patch; do git apply "$p"; done
+    # Build changes (not source changes): no CUDA toolkit needed for LibTorch (see
+    # TorchNoToolkit.cmake); portable code instead of -march=native (images must run on every
+    # GPU node type); only the library and the vocabulary converter are built.
+    cp /opt/slambench/src/TorchNoToolkit.cmake /opt/SP_SLAM3/TorchNoToolkit.cmake
+    sed -i 's|^find_package(Torch REQUIRED)|include(${PROJECT_SOURCE_DIR}/TorchNoToolkit.cmake)|' CMakeLists.txt
+    grep -q 'TorchNoToolkit.cmake' CMakeLists.txt
+    grep -rl --include=CMakeLists.txt -e '-march=native' . | xargs sed -i 's/-march=native//g'
+    git diff --stat
+
+    cd /opt/SP_SLAM3/Thirdparty/Sophus && mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SOPHUS_TESTS=OFF -DBUILD_SOPHUS_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF
+    make -j${JOBS} && make install
+    cd /opt/SP_SLAM3/Thirdparty/DBoW3 && mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release && make -j${JOBS}
+    cd /opt/SP_SLAM3 && mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DLIBTORCH_ROOT=/opt/libtorch
+    make -j${JOBS} g2o && make -j${JOBS} ORB_SLAM3 convert_vocab   # libg2o is not a declared dependency
+
+    # Binary DBoW3 vocabulary (upstream ships the LFS yml.gz and converts it the same way).
+    cd /opt/SP_SLAM3
+    ./tools/convert_vocab Vocabulary/superpoint_voc.yml.gz Vocabulary/superpoint_voc.dbow3
+    rm -f Vocabulary/superpoint_voc.yml.gz
+
+    # LightGlue TorchScript model, exported in a throwaway CPU-only Python environment.
+    python3 -m venv /opt/src/export-venv
+    . /opt/src/export-venv/bin/activate
+    pip install --no-cache-dir --upgrade pip
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.3.0 torchvision==0.18.0
+    pip install --no-cache-dir numpy==1.24.4 kornia==0.7.3 opencv-python-headless==4.10.0.84 packaging
+    pip install --no-cache-dir --no-deps "git+https://github.com/cvg/LightGlue.git@${LIGHTGLUE_COMMIT}"
+    export TORCH_HOME=/opt/src/torch_home
+    python /opt/slambench/src/export_lightglue_slambench.py /opt/SP_SLAM3/scripts /opt/SP_SLAM3/lightglue.pt
+    LIGHTGLUE_WEIGHTS_SHA256=$(sha256sum /opt/src/torch_home/hub/checkpoints/*.pth | cut -c1-64)
+    deactivate
+    rm -rf /opt/src/export-venv /opt/src/torch_home /root/.cache
+
+    cd /opt/slambench/src && mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DSPSLAM3_ROOT=/opt/SP_SLAM3 -DLIBTORCH_ROOT=/opt/libtorch && make -j${JOBS}
+    mkdir -p /opt/slambench/bin && cp spslam3_driver /opt/slambench/bin/
+    cd /opt/slambench/src && rm -rf build
+
+    {
+      echo "spslam3_commit=$(git -C /opt/SP_SLAM3 rev-parse HEAD)"
+      echo "spslam3_local_changes=$(git -C /opt/SP_SLAM3 diff --stat | tail -1)"
+      echo "driver_source_sha1=$(cat /opt/slambench/src/slambench_spslam3_driver.cc /opt/slambench/src/slambench_preprocess.h $(LC_ALL=C ls /opt/slambench/patches/*.patch) | sha1sum | cut -c1-40)"
+      echo "libtorch_url=${LIBTORCH_URL}"
+      echo "libtorch=$(cat /opt/libtorch/build-version)"
+      echo "lightglue_commit=${LIGHTGLUE_COMMIT}"
+      echo "lightglue_weights_sha256=${LIGHTGLUE_WEIGHTS_SHA256}"
+      echo "lightglue_model_sha256=$(sha256sum /opt/SP_SLAM3/lightglue.pt | cut -c1-64)"
+      echo "superpoint_model_sha256=$(sha256sum /opt/SP_SLAM3/superpoint.pt | cut -c1-64)"
+      echo "vocabulary_sha256=$(sha256sum /opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3 | cut -c1-64)"
+      echo "pangolin_commit=$(git -C /opt/src/Pangolin rev-parse HEAD)"
+      echo "opencv=$(pkg-config --modversion opencv4)"
+      echo "eigen=$(pkg-config --modversion eigen3)"
+      echo "boost=$(dpkg-query -W -f='${Version}' libboost-serialization-dev)"
+      echo "gcc=$(gcc -dumpfullversion)"
+      echo "base_os=$(. /etc/os-release && echo $PRETTY_NAME)"
+    } > /opt/slambench/versions.txt
+    git -C /opt/SP_SLAM3 diff > /opt/slambench/spslam3_applied.diff
+    cat /opt/slambench/versions.txt
+    rm -rf /opt/SP_SLAM3/build /opt/SP_SLAM3/Thirdparty/*/build/CMakeFiles /opt/SP_SLAM3/.git/lfs \
+           /opt/SP_SLAM3/evaluation /opt/SP_SLAM3/imgs
+
+%runscript
+    exec /opt/slambench/bin/spslam3_driver "$@"
+
+%test
+    test -x /opt/slambench/bin/spslam3_driver
+    test -f /opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3
+    test -f /opt/SP_SLAM3/superpoint.pt
+    test -f /opt/SP_SLAM3/lightglue.pt
+    ldd /opt/slambench/bin/spslam3_driver | grep -q libtorch_cuda.so
+    for f in /opt/libtorch/lib/libnvrtc-builtins.so.*; do test -e "$f"; done
+    cat /opt/slambench/versions.txt
