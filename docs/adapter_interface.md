@@ -136,7 +136,8 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   beyond LAC's: `cpu_threads` (OMP/MKL threads, default 1), `max_depth_m` / `min_disparity_px` /
   `max_row_diff_px` (stereo filters, null = LAC) and `vo_reference` (`previous` = LAC
   frame-to-frame PnP, `keyframe` = PnP against a kept reference frame, with `vo_ref_max_flow_px`
-  and `vo_ref_min_match_frac`); see `docs/results/lac_lunapolaris.md`.
+  and `vo_ref_min_match_frac`), and `frame_stride` (diagnostic: feed every Nth frame through a
+  run-local `algorithm/input/` view); see `docs/results/lac_lunapolaris.md`.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

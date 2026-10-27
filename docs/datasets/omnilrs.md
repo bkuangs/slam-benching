@@ -65,3 +65,7 @@ ORB-SLAM3 stereo (same settings as the real runs), SE(3)-aligned over the same 6
 
 The simulated floor is smoother and brighter than the real gravel (fewer, weaker corners), which is the most
 visible sim-to-real difference so far.
+
+LAC on the same replay (`configs/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`, CUDA GPU) matches ORB-SLAM3
+in simulation (kfvo: 0.012 m, ratio 0.987) but not on the real recording (0.025 m, 0.953). `depth0/` serves as
+the exact reference for `scripts/stereo_depth_bias.py --gt-depth`. See `docs/results/lac_lunapolaris.md`.

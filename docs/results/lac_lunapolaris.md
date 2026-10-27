@@ -107,6 +107,52 @@ Even with keyframe VO, the motion ratio stays at 0.93–0.96. Some bias remains,
 coarse keypoints or from PnP's 1 px RANSAC threshold. Sub-pixel keypoint refinement is the obvious
 next step, but it has not been tried.
 
+### Follow-up: frame stride, simulation and stereo depth
+
+**Frame stride** (`frame_stride` setting: feed every Nth frame, so per-frame motion is N times
+larger). seq01, full sequence, single runs:
+
+| Run | ATE | Median displacement ratio (5 s) |
+|---|---|---|
+| ORB-SLAM3 / RTAB-Map (`_lean`) | 0.031 / 0.064 m | 0.985 / 0.988 |
+| LAC-faithful, stride 1 / 2 / 4 | 1.034 / 0.451 / 0.205 m | 0.925 / 0.938 / 0.956 |
+| LAC-kfvo, stride 1 / 2 / 4 | 0.162 / 0.126 / 0.134 m | 0.956 / 0.953 / 0.955 |
+
+A larger stride removes the faithful variant's extra shrinkage, as the cause above predicts. Both
+variants then level off at about 0.955, so per-frame motion does not explain the remaining bias.
+
+**Simulation** (`configs/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`; see `docs/datasets/omnilrs.md`).
+These runs replay the first 60 s of seq01 in the OmniLRS Lunalab, with exact calibration and ground truth.
+SE(3)-aligned over the same 60 s, using the end-displacement ratio:
+
+| Run | Real ATE / ratio | Sim ATE / ratio |
+|---|---|---|
+| ORB-SLAM3 | 0.010 m / 0.987 | 0.014 m / 0.989 |
+| LAC-kfvo | 0.025 m / 0.953 | **0.012 m / 0.987** |
+| LAC-faithful | 0.057 m / 0.938 | 0.021 m / 0.970 |
+
+**In simulation, LAC-kfvo matches ORB-SLAM3.** Its extra motion shrinkage is specific to the real
+images. The same camera, motion, keypoint grid and LAC code are used in both cases.
+
+**Stereo depth.** `scripts/lac_stereo_depth_probe.py` runs LAC's own stereo matching (SuperPoint +
+LightGlue) on every Nth frame. `scripts/stereo_depth_bias.py` compares the resulting keypoint depths
+with a depth reference.
+
+- **Sim vs exact depth:** median ratio 0.999; disparity error +0.04 px. No bias.
+- **Real vs the LiDAR reference map:** median ratio 1.08, i.e. LAC's depths are *longer*, not
+  shorter. The result is noisy:
+  - only 20% of matches have a LiDAR depth within 1.5 px;
+  - the spread is wide (IQR about ±15%);
+  - the LiDAR-to-camera extrinsic is the nominal URDF.
+
+  Too-long depths would exaggerate motion, so they do not explain the shrinkage either.
+
+SuperPoint keypoints sit on a 0.625 px grid: they are integer pixels at the 1024 px resize, scaled
+back to 640 px.
+
+Open causes are real-image effects on matching: sensor noise, the repetitive gravel texture, and
+exposure. A next step is adding noise and gravel-like texture to the simulator renders.
+
 ## Resource usage
 
 | Seq | Method | Frame time mean / p95 (ms) | Frontend median (ms) | Backend median / max | Image load median (ms) | CPU per frame (ms) | CPU per s of data | Mid-run cores | Peak RSS (MB) | Peak GPU mem (GiB) | Wall / data duration |

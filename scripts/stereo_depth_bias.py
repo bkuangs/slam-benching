@@ -101,7 +101,7 @@ def report(name, cam, m, z_ref, n_raw, bins):
     ratio = z_lac / z_ref
     out = {"name": name, "matches_raw": n_raw, "matches_with_reference": int(ok.sum()),
            "median_ratio": float(np.median(ratio)), "median_disp_err_px": float(np.median(derr)),
-           "keypoint_subpixel_fraction": float(np.mean(np.abs(m["uL"] - np.round(m["uL"])) > 1e-3)),
+           "keypoint_grid_px": float(np.min(np.diff(np.unique(np.round(m["uL"], 4))))),
            "bins": []}
     # robust fit of disparity error: derr = d0 + k * disp  (k != 0: focal/baseline scale error)
     inl = np.abs(derr - np.median(derr)) < 3 * 1.4826 * np.median(np.abs(derr - np.median(derr)))
@@ -111,7 +111,7 @@ def report(name, cam, m, z_ref, n_raw, bins):
     print(f"\n== {name}: {ok.sum():,}/{n_raw:,} matches with reference depth")
     print(f"   median depth ratio LAC/ref {out['median_ratio']:.3f}, median disparity error "
           f"{out['median_disp_err_px']:+.3f} px; fit: offset {d0:+.3f} px, scale {k:+.4f}; "
-          f"sub-pixel keypoints {out['keypoint_subpixel_fraction'] * 100:.0f}%")
+          f"keypoint grid {out['keypoint_grid_px']:.3f} px")
     print(f"   {'ref depth (m)':>14} {'n':>7} {'ratio p25/med/p75':>22} {'disp err px (med)':>18}")
     for lo, hi in zip(bins[:-1], bins[1:]):
         s = (z_ref >= lo) & (z_ref < hi)
