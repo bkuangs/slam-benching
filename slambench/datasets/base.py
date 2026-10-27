@@ -144,19 +144,39 @@ class DatasetAdapter(ABC):
             manifest = json.loads(manifest_path.read_text())
             if manifest.get("complete") and manifest.get("preparation_key") == key:
                 return PreparedInput(out, mode, manifest["n_frames"], manifest.get("n_imu", 0), manifest)
-        tmp = out.with_name(out.name + ".partial")
-        if tmp.exists():
-            import shutil
-            shutil.rmtree(tmp)
+        import os
+        import shutil
+        import uuid
+
+        # Per-process staging dir: several jobs may prepare the same sequence concurrently.
+        tmp = out.with_name(f"{out.name}.partial-{os.getpid()}-{uuid.uuid4().hex[:8]}")
         tmp.mkdir(parents=True)
-        prepared = self.prepare_offline(mode, tmp)
-        prepared.manifest.update({"complete": True, "preparation_key": key, "preparation_inputs": inputs})
-        (tmp / "manifest.json").write_text(json.dumps(prepared.manifest, indent=2, default=str))
-        if out.exists():
-            import shutil
-            shutil.rmtree(out)
-        tmp.rename(out)
+        try:
+            prepared = self.prepare_offline(mode, tmp)
+            prepared.manifest.update({"complete": True, "preparation_key": key, "preparation_inputs": inputs})
+            (tmp / "manifest.json").write_text(json.dumps(prepared.manifest, indent=2, default=str))
+            if out.exists() and not self._complete_preparation(out, key):
+                shutil.rmtree(out, ignore_errors=True)
+            try:
+                tmp.rename(out)
+            except OSError:
+                if not self._complete_preparation(out, key):
+                    raise
+                # another process finished the same preparation first: use theirs
+                manifest = json.loads(manifest_path.read_text())
+                return PreparedInput(out, mode, manifest["n_frames"], manifest.get("n_imu", 0), manifest)
+        finally:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
         return PreparedInput(out, mode, prepared.n_frames, prepared.n_imu, prepared.manifest)
+
+    @staticmethod
+    def _complete_preparation(out: Path, key: str) -> bool:
+        try:
+            manifest = json.loads((Path(out) / "manifest.json").read_text())
+        except (OSError, ValueError):
+            return False
+        return bool(manifest.get("complete")) and manifest.get("preparation_key") == key
 
 
 #: Files up to this size are fingerprinted by content; larger ones by size + mtime.

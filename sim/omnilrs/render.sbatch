@@ -1,7 +1,8 @@
 #!/bin/bash
-# Render an OmniLRS Lunalab stereo sequence on a PACE RTX 6000 node (Isaac Sim 5.0.0 crashes on driver 615
+# Render an OmniLRS (Lunalab or Lunaryard) stereo sequence on a PACE RTX 6000 node (Isaac Sim 5.0.0 crashes on driver 615
 # L40S/A40 nodes; the RTX 6000 nodes run driver 580).
 #   sbatch -p coc-gpu -q coc-ice --gres=gpu:rtx_6000:1 sim/omnilrs/render.sbatch <poses.npz> <out_dir> [render_stereo.py args]
+# (also called by render_lunaryard_sweep.sbatch)
 #SBATCH -c 6 --mem=48G -t 04:00:00 -J omnilrs_render
 set -euo pipefail
 O=${OMNILRS_WORK:-/storage/ice1/3/6/bkuang7/omnilrs}   # SIF, OmniLRS clone, pydeps, caches (real path, not ~/scratch)

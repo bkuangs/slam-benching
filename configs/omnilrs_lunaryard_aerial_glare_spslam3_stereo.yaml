@@ -1,0 +1,48 @@
+# spslam3 stereo on the OmniLRS Lunaryard aerial survey, lighting 'glare': sun elevation 10 deg, azimuth 270 (ahead of the camera on the +x legs), lens flares on.
+# Rendered by sim/omnilrs/render_lunaryard_sweep.sbatch from sim/omnilrs/aerial_poses.py (5 m above the
+# terrain, 2 m/s, camera pitched 60 deg down, 15 Hz, 120 s). Estimator settings identical to
+# configs/lunapolaris_seq01_spslam3_stereo.yaml (needs a CUDA GPU). See docs/datasets/omnilrs.md ("Aerial Lunaryard lighting sweep").
+#   sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_glare_spslam3_stereo.yaml
+name: omnilrs_lunaryard_aerial_glare_spslam3_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: lunaryard_aerial_glare
+
+algorithm:
+  name: spslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/spslam3_9439971.sif
+  settings:
+    sp_n_features: 1200          # = orb_n_features of the ORB-SLAM3 lean config
+    sp_n_levels: 1               # SuperPoint on the full-resolution image only (SP_SLAM3 recommendation)
+    # SuperPoint confidence thresholds. The SP_SLAM3 README values (0.155 / 0.055, the adapter
+    # defaults) leave ~40 keypoints per LunaPolaris frame (low-texture regolith; ~90 even at 0.005),
+    # far below the 500 that stereo initialisation needs, so tracking never starts. These thresholds
+    # fill the same 1200-keypoint budget as ORB-SLAM3 (top-1200 NMS'd heatmap maxima, spread by the
+    # oct-tree); see docs/adapter_interface.md.
+    sp_ini_th: 0.00001
+    sp_min_th: 0.000001
+    sp_fp16: false
+    lightglue: true
+    lightglue_fp16: false
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

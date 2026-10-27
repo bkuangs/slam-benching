@@ -1,10 +1,10 @@
-"""OmniLRS (Isaac Sim) rendered stereo sequences, written by sim/omnilrs/render_stereo.py.
+"""OmniLRS (Isaac Sim) rendered stereo sequences (Lunalab or Lunaryard), written by sim/omnilrs/render_stereo.py.
 
 Layout (one directory per rendered sequence, ``<root>/<sequence>/``):
     cam0/<ns>.png, cam1/<ns>.png   rectified BGR PNG stereo pair (rendered pinhole, zero distortion)
     depth0/<ns>.png                left z-depth, uint16 mm (GT-only; never handed to estimators)
     frames.csv                     timestamp_ns,left_path,right_path
-    gt_cam0.tum                    exact left optical-frame pose per frame (TUM, Lunalab world frame)
+    gt_cam0.tum                    exact left optical-frame pose per frame (TUM, environment world frame)
     calib.json                     intrinsics / baseline the renderer actually used
     dem.npy, dem.json, rocks.json  terrain truth for map-quality evaluation
 
@@ -41,6 +41,9 @@ class OmniLrsAdapter(DatasetAdapter):
     def _calib(self) -> dict:
         return json.loads((self.seq_dir / "calib.json").read_text())
 
+    def _environment(self) -> str:
+        return str(self._calib().get("environment", "lunalab"))  # renders before --env existed: Lunalab
+
     @lru_cache(maxsize=None)
     def _frames(self):
         rows = []
@@ -58,7 +61,7 @@ class OmniLrsAdapter(DatasetAdapter):
     def provenance(self):
         p = super().provenance()
         p["render"] = {k: v for k, v in self._calib().items() if k in ("source", "renderer", "rt_subframes",
-                                                                        "lighting", "rocks")}
+                                                                        "lighting", "rocks", "environment")}
         dem = self.seq_dir / "dem.json"
         if dem.exists():
             p["terrain"] = json.loads(dem.read_text()).get("terrain")
@@ -73,7 +76,7 @@ class OmniLrsAdapter(DatasetAdapter):
                    for cam in ("cam0", "cam1")}
         return SequenceInfo(self.name, self.sequence, str(self.seq_dir), (t[-1] - t[0]) * 1e-9, streams,
                             (self.seq_dir / "gt_cam0.tum").exists(),
-                            notes=["rendered in OmniLRS Lunalab (Isaac Sim); GT is the exact render pose"])
+                            notes=[f"rendered in OmniLRS {self._environment()} (Isaac Sim); GT is the exact render pose"])
 
     def stereo_calibration(self) -> Optional[StereoCalibration]:
         c = self._calib()
@@ -100,7 +103,7 @@ class OmniLrsAdapter(DatasetAdapter):
         t = np.array([r[0] for r in self._frames()], dtype=np.int64)
         if len(t) != len(d) or np.max(np.abs(t * 1e-9 - d[:, 0])) > 1e-6:
             t = np.round(d[:, 0] * 1e9).astype(np.int64)
-        return GroundTruth(t, d[:, 1:4], d[:, 4:8], reference_frame="lunalab_world", body_frame="cam0",
+        return GroundTruth(t, d[:, 1:4], d[:, 4:8], reference_frame=f"{self._environment()}_world", body_frame="cam0",
                            source=str(path), notes=["render poses (exact, noise-free)"])
 
     def T_gt_body_sensor(self, sensor_frame: str) -> Optional[np.ndarray]:

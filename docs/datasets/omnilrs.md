@@ -69,3 +69,85 @@ visible sim-to-real difference so far.
 LAC on the same replay (`configs/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`, CUDA GPU) matches ORB-SLAM3
 in simulation (kfvo: 0.012 m, ratio 0.987) but not on the real recording (0.025 m, 0.953). `depth0/` serves as
 the exact reference for `scripts/stereo_depth_bias.py --gt-depth`. See `docs/results/lac_lunapolaris.md`.
+
+## Aerial Lunaryard lighting sweep
+A drone-like stereo survey over the OmniLRS **Lunaryard 80 m** (procedural DEM with craters, seed 42, 5 cm grid)
+under four lighting conditions, with the same trajectory, terrain and rocks in all four. It asks whether learned
+features (SP_SLAM3: SuperPoint + LightGlue) beat ORB under harsh lighting and faster aerial motion. Results:
+[`docs/results/lunaryard_aerial_lighting.md`](../results/lunaryard_aerial_lighting.md).
+
+### Reproduce
+```bash
+# DEM dump, poses on that DEM, 12-frame previews per condition, then the 4 full renders (one RTX 6000 job, ~1.5 h)
+sbatch -p coc-gpu -q coc-ice --gres=gpu:rtx_6000:1 sim/omnilrs/lunaryard_aerial.sbatch      # STAGES="dem poses preview full"
+# 12 estimator runs (ORB-SLAM3 on ice-cpu; SP_SLAM3 / LAC need a CUDA GPU)
+for c in nominal low_sun dim glare; do
+  sbatch scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_${c}_orbslam3_stereo.yaml
+  for e in spslam3_stereo lac_stereo_kfvo; do
+    sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 \
+           scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_${c}_${e}.yaml
+  done
+done
+```
+The renders are written to `renders/lunaryard_aerial_<condition>/` (layout as above; ~1.1–1.7 GB each).
+`render_stereo.py --env lunaryard` options: `--yard-size 20|40|80`, `--seed`, `--sun-azimuth`, `--sun-elevation`,
+`--sun-intensity` (the distant light is set directly and the stellar engine is disabled, so the lighting is
+static), `--terrain-material Basalt|Sand|LunarRegolith8k`, `--texture-scale`, `--albedo-brightness`, `--rocks N`,
+`--lens-flares on|off`, `--dem-only`, `--preview N`. `calib.json` records the environment, terrain material,
+rock count, lighting (requested and measured sun direction, exposure/tonemapper settings) and whether the sun
+disk is ever inside the left image. Lunaryard renders take ~0.35 s per stereo frame plus ~90 s scene setup.
+
+### Settings
+* **Trajectory** (`sim/omnilrs/aerial_poses.py`): lawnmower survey of 5 legs × 35.4 m along ±x, 10 m apart,
+  joined by 5 m-radius semicircular turns at a constant yaw rate (0.4 rad/s). It covers x 17–63 m, y 20–60 m,
+  so the camera is ≥ 10 m from every edge and the image footprint stays on the terrain. The drone flies at
+  2 m/s (240 m in 120 s), 15 Hz, 1800 frames. Altitude is the DEM mean + 5 m (AGL 4.5–5.7 m, mean 5.0, stored per frame as
+  `agl_m`). The camera looks along the direction of travel, pitched 60° down, and has smooth sinusoidal
+  perturbations of ±0.3 m altitude and ±2° pitch/roll/yaw. Camera: the ZED2-like rectified 640×360 pinhole with
+  `fx = fy = 263.27` and baseline 0.11983 m used for the LunaPolaris replays. Legs 0/2/4 fly +x and legs 1/3 fly −x.
+* **Lighting** (`sim/omnilrs/render_lunaryard_sweep.sbatch`). Sun azimuth 180° puts the sun toward −y, across
+  the legs; azimuth 270° puts it toward +x, i.e. ahead of the camera on legs 0/2/4.
+
+  | condition | sun az / el | intensity | look |
+  |---|---|---|---|
+  | `nominal` | 180° / 45° | 1750 (cfg default) | evenly lit, short shadows, mean grey ≈ 100 |
+  | `low_sun` | 180° / 7° | 1750 | grazing light, crater interiors and long rock shadows pitch black, mean grey ≈ 30 |
+  | `dim` | 180° / 45° | 175 (÷10) | underexposed, mean grey ≈ 13 |
+  | `glare` | 270° / 10° | 1750, lens flares on | sun ahead on +x legs (backlit, shadows toward the camera, bright forward-scatter sheen at the top of the frame), behind on −x legs; mean grey ≈ 55 |
+
+  Exposure is fixed (auto-exposure `/rtx/post/histogram/enabled` off; tonemapper and camera f-stop/ISO at their
+  defaults), so `dim` really is darker. **The sun disk is never in the image.** With a 60° pitch the top image row
+  looks ≥ 24° below the horizon, and for `glare` the sun is ≥ 34° from the top-centre ray. Lens flares are
+  enabled for `glare` but have nothing to flare from.
+* **Terrain look.** The Lunaryard cfg's `Basalt` material (GravelStones, `texture_scale` 5 = texture repeating
+  every 0.2 m, albedo 0.3) renders as a featureless grey at 5 m AGL. A nominal preview gave 4–24 ORB keypoints
+  per frame (FAST 20), with only soft crater shading. The OmniLRS MDLs bake their parameters in (`material X(*)`),
+  so `--texture-scale` / `--albedo-brightness` write a modified copy of the MDL next to the original and bind
+  that. The sweep uses `--texture-scale 0.2 --albedo-brightness 0.6` (the gravel texture repeats every 5 m and
+  reads as fine regolith from 5 m) and `--rocks 300` instead of the default 10, giving ~1000 ORB keypoints per
+  nominal frame. Override this with `TERRAIN="..."`.
+* **Estimators.** Settings are identical to the real LunaPolaris configs: `lunapolaris_seq01_orbslam3_stereo_lean`,
+  `lunapolaris_seq01_spslam3_stereo` (SuperPoint thresholds 1e-5/1e-6, 1200 keypoints, LightGlue) and
+  `lunapolaris_seq01_lac_stereo_kfvo`. Only the dataset block differs.
+
+### Results (mean [min, max] over 3 runs for ORB-SLAM3 / SP_SLAM3, 1 run for LAC)
+| lighting | ORB-SLAM3 ATE SE3 | SP_SLAM3 ATE SE3 | LAC kfvo ATE SE3 |
+|---|---|---|---|
+| nominal | **0.126** [0.117, 0.137] | 0.181 [0.135, 0.243] | 0.589 |
+| low_sun | **0.175** [0.164, 0.192] | 0.249 [0.187, 0.284] | 0.600 |
+| dim | **0.169** [0.151, 0.179] | 0.199 [0.138, 0.232] | 0.616 |
+| glare | **0.152** [0.127, 0.191] | 0.387 [0.316, 0.469] | 0.691 |
+
+Every successful run tracked 100% of the frames in one map, with no tracking loss. One ORB-SLAM3 nominal run
+aborted at 22% of the sequence with the known `Sophus::SO3::exp` NaN abort; it was re-run. The full table
+(Sim3, RPE, scale, frame time) and the interpretation are in the results file.
+
+### Caveats
+* No sensor noise, motion blur, rolling shutter, vignetting or auto-exposure. Real underexposed images would be
+  noisy, so `dim` is optimistic, especially for FAST (ORB-SLAM3 falls back to its FAST threshold of 7 here).
+* The terrain texture is a modified OmniLRS material, not a calibrated lunar regolith: it repeats every 5 m,
+  and the 300 rocks come from OmniLRS's `lunalab_rocks` set. The DEM relief is gentle (craters, no large slopes).
+* The sun is never in view, so `glare` tests backlit, low-sun scenes with specular sheen, not a sun disk or flare.
+* The principal point is the image centre. The timestamps are synthetic (15 Hz from 1.8e18 ns). There is no IMU.
+* SP_SLAM3 needs ~160 ms per frame on a V100, 2.4× the 67 ms frame period. Playback is throttled, not dropping
+  frames, so it processed every frame but each run took 2.7× real time.

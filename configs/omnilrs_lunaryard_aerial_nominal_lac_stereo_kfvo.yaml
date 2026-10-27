@@ -1,0 +1,35 @@
+# lac stereo on the OmniLRS Lunaryard aerial survey, lighting 'nominal': sun elevation 45 deg, azimuth 180, default intensity 1750.
+# Rendered by sim/omnilrs/render_lunaryard_sweep.sbatch from sim/omnilrs/aerial_poses.py (5 m above the
+# terrain, 2 m/s, camera pitched 60 deg down, 15 Hz, 120 s). Estimator settings identical to
+# configs/lunapolaris_seq01_lac_stereo_kfvo.yaml (needs a CUDA GPU). See docs/datasets/omnilrs.md ("Aerial Lunaryard lighting sweep").
+#   sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_nominal_lac_stereo_kfvo.yaml
+name: omnilrs_lunaryard_aerial_nominal_lac_stereo_kfvo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: lunaryard_aerial_nominal
+
+algorithm:
+  name: lac
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/lac_26c3a2b.sif
+  settings:
+    playback_rate: 1.0
+    keyframe_interval_s: 1.0
+    loop_closure: true
+    vo_reference: keyframe
+
+execution:
+  timeout_s: 7200                 # LAC re-optimizes the full pose graph at every accepted loop closure
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}
