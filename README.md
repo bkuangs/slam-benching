@@ -43,6 +43,8 @@ scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calib
 scripts/compare_variants.py           repeated runs of config variants: outages, map continuity, shared-timestamp error
 scripts/lac_stereo_depth_probe.py     dump LAC's stereo keypoint matches (runs in the LAC container, GPU)
 scripts/stereo_depth_bias.py          stereo depth bias vs simulator GT depth or the LiDAR reference map
+vpr/, scripts/vpr_*.py                place recognition benchmark: AnyLoc/MixVPR/CosPlace vs DBoW2 retrieval + LightGlue/PnP
+                                      relocalization (docs/results/place_recognition.md)
 docs/                                 adapter interface, evaluation methodology, dataset notes
 tests/                                evaluator / runner tests with synthetic ground truth
 ```
