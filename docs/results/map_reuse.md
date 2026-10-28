@@ -142,6 +142,26 @@ merged, so it stays in an unknown frame.
 `init_failure` rows in merge mode (ORB seq02, both seq11) likewise tracked the whole query in
 their own new map but never merged into the loaded map.
 
+### Real (LunaPolaris, map = seq11)
+Session A seq11 maps: ORB-SLAM3 ATE 0.089 m, SP_SLAM3 ATE 0.098 m (`right_row_shift_px: -1.63`).
+
+| estimator | mode | query | localized | ≤0.5 m | first loc | RMSE | median | p95 | rot med | longest lost | ms/frame |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ORB-SLAM3 | relocalize | seq11 | 0.989 | 0.966 | 10.0 s | 0.089 m | 0.083 m | 0.135 m | 4.23° | 0.0 s | 28 |
+| ORB-SLAM3 | relocalize | seq01 | **0** (init_failure) | 0.000 | – | – | – | – | – | – | 27 |
+| ORB-SLAM3 | merge | seq11 | 0.924 | 0.902 | 68.6 s | 0.087 m | 0.081 m | 0.134 m | 4.22° | 0.0 s | 25 |
+| ORB-SLAM3 | merge | seq01 | **0** (init_failure) | 0.000 | – | – | – | – | – | – | 25 |
+| SP_SLAM3 | relocalize | seq11 | 1.000 | 0.977 | 0.0 s | 0.130 m | 0.095 m | 0.245 m | 3.96° | 0.0 s | 135 |
+| SP_SLAM3 | relocalize | seq01 | **0** (init_failure) | 0.000 | – | – | – | – | – | – | 128 |
+| SP_SLAM3 | merge | seq11 | 0.969 | 0.947 | 27.9 s | 0.096 m | 0.086 m | 0.155 m | 4.02° | 0.0 s | 134 |
+| SP_SLAM3 | merge | seq01 | **0** (init_failure) | 0.000 | – | – | – | – | – | – | 127 |
+
+The seq11 → seq11 sanity runs pass: 92–100 % localized, at session A's own accuracy. The seq11
+map is therefore usable. Reuse fails in both directions between seq01 and seq11, so the lighting
+and scene change, not the map, defeats DBoW place recognition. Learned retrieval addresses this
+step: see [place_recognition.md](place_recognition.md), where real 01→11 Recall@1 is 37–39 %
+with AnyLoc/MixVPR versus 3 % with DBoW2.
+
 The rotation error on LunaPolaris is about 4° even for the seq01 → seq01 sanity run, while the
 translation error is 3 cm. The SE(3) map→GT alignment is fitted on positions, so a constant
 marker-to-camera rotation offset in the mocap GT cannot be absorbed and shows up as rotation
@@ -172,7 +192,8 @@ error. Session A's own aligned rotation ATE is also 4.2°. Compare the translati
    * seq02 (similar exposure):
      * SP_SLAM3 relocalizes at 0.2 s (95 % localized) and merges at 37 s (96 %, 5.3 cm median).
      * ORB-SLAM3 needs 204 s to first relocalize (77 %, 3.4 cm median) and never merges.
-   * seq11 (darker, 7 % saturated pixels, different day) fails for both systems in both modes.
+   * seq11 (darker, 7 % saturated pixels, different day) fails for both systems in both modes,
+     in both directions (seq01 map → seq11 and seq11 map → seq01). seq11 → seq11 works (92–100 %).
 5. **SP_SLAM3 relocalize-only is inaccurate on real data.** It localizes often (95–99 %), but
    the median error is 0.09–0.32 m and the p95 is about 0.9 m, versus 5 cm in merge mode. In
    relocalize-only mode no local mapping runs, so tracking motion-only-optimizes against the
