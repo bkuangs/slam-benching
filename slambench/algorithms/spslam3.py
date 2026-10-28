@@ -20,6 +20,9 @@ Differences from the ORB-SLAM3 adapter:
 * ``apptainer exec --nv``: SuperPoint and LightGlue run on the GPU through LibTorch (CUDA 12.1);
   without a GPU they silently fall back to the CPU, which driver_status.json records as
   ``cuda_available: false``.
+
+Map reuse (``save_map`` / ``load_map`` / ``reuse_mode``, see orbslam3_map_reuse) works as for
+ORB-SLAM3; patch 0006 re-enables the fork's disabled atlas save/load (and fixes its serialization).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import numpy as np
 
 from ..types import SensorMode
 from .base import RunContext
+from . import orbslam3_map_reuse as mr
 from .orbslam3 import OrbSlam3Adapter, _fmt
 
 
@@ -51,6 +55,11 @@ DRIVER_SOURCE_DIR = Path(__file__).resolve().parents[2] / "third_party" / "spsla
 DRIVER_SOURCES = (DRIVER_SOURCE_DIR / "slambench_spslam3_driver.cc",
                   DRIVER_SOURCE_DIR.parent / "orbslam3" / "slambench_preprocess.h")
 SETTINGS_FILE = "spslam3_settings.yaml"
+# Images built from an older driver / patch set that still produce identical results for configs
+# without map reuse (the driver and patch 0006 only add behaviour behind the map-reuse settings).
+LEGACY_DRIVER_SOURCE_SHA1 = {
+    "463cc0adb1f40a28ef3c26bb22d320dea6089a30": "spslam3_9439971.sif: before map reuse (patch 0006)",
+}
 
 
 def driver_source_sha1() -> Optional[str]:
@@ -98,11 +107,16 @@ class SpSlam3Adapter(OrbSlam3Adapter):
         return Path(p).expanduser()
 
     def resolve_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        unknown = set(settings) - set(DEFAULT_SETTINGS)
+        unknown = set(settings) - set(DEFAULT_SETTINGS) - set(mr.MAP_REUSE_DEFAULTS)
         if unknown:
             raise ValueError(f"unknown spslam3 settings: {sorted(unknown)}")
         out = dict(DEFAULT_SETTINGS)
+        # Map-reuse keys are only added to the resolved settings when used (keeps old configs identical).
+        if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
+            out.update(mr.MAP_REUSE_DEFAULTS)
         out.update(settings)
+        if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
+            mr.resolve_map_reuse_settings(out)
         if out["loop_closure"] is not True:
             raise ValueError("SP_SLAM3 cannot disable loop closing; loop_closure must be true")
         for k in ("sp_n_features", "sp_n_levels", "clahe_tile_grid"):
@@ -137,6 +151,7 @@ class SpSlam3Adapter(OrbSlam3Adapter):
         if calib.left.model != "pinhole" or not calib.left.rectified:
             problems.append("SP_SLAM3 adapter supports rectified pinhole stereo only "
                             f"(got {calib.left.model}, rectified={calib.left.rectified})")
+        problems += self._map_reuse_validate(mode, settings)
         return problems
 
     def estimate_frame(self, mode: SensorMode) -> str:
@@ -166,7 +181,10 @@ class SpSlam3Adapter(OrbSlam3Adapter):
             raise RuntimeError(f"container SP_SLAM3 commit {commit} != pinned {SPSLAM3_COMMIT}")
         info["expected_driver_source_sha1"] = expected = driver_source_sha1()
         found = info.get("container_versions", {}).get("driver_source_sha1")
-        if commit and expected and found != expected:
+        self._legacy_driver = None
+        if commit and expected and found != expected and found in LEGACY_DRIVER_SOURCE_SHA1:
+            self._legacy_driver = info["legacy_driver_source"] = LEGACY_DRIVER_SOURCE_SHA1[found]
+        elif commit and expected and found != expected:
             raise RuntimeError(f"container driver source {found or '(not recorded)'} differs from this "
                                f"repository's driver {expected}; rebuild the image with "
                                "third_party/spslam3/build_container.sh")
@@ -208,17 +226,20 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                   "Viewer.PointSize: 2.0", "Viewer.CameraSize: 0.08", "Viewer.CameraLineWidth: 3.0",
                   "Viewer.ViewpointX: 0.0", "Viewer.ViewpointY: -0.7", "Viewer.ViewpointZ: -1.8",
                   "Viewer.ViewpointF: 500.0"]
+        lines += mr.settings_yaml_lines(s, ctx.algo_dir)
         return "\n".join(lines) + "\n"
 
     def prepare(self, ctx: RunContext) -> None:
         ctx.algo_dir.mkdir(parents=True, exist_ok=True)
         (ctx.algo_dir / SETTINGS_FILE).write_text(self._settings_yaml(ctx))
+        mr.prepare(ctx.settings, ctx.algo_dir)
 
     def command(self, ctx: RunContext) -> List[str]:
         s = ctx.settings
         cmd = [self.apptainer, "exec", "--nv", "--cleanenv"]
         for b in self._binds(ctx):
             cmd += ["-B", b]
+        cmd += mr.bind(s)
         cmd += [str(self.container), "/opt/slambench/bin/spslam3_driver", VOCABULARY,
                 str((ctx.algo_dir / SETTINGS_FILE).resolve()),
                 ctx.mode.value, str(ctx.prepared.directory.resolve()), str(ctx.algo_dir.resolve()),
@@ -228,4 +249,4 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                     "--clahe-tile", str(int(s["clahe_tile_grid"]))]
         if s["log_features"]:
             cmd.append("--log-features")
-        return cmd
+        return cmd + mr.command_args(s)

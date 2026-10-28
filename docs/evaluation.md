@@ -106,7 +106,12 @@ as completion.
   (= frames / Σ tracking time) is the offline throughput of the tracking thread.
 
 ## Map reuse (`map_reuse`, localization runs only)
-A localization run (RTAB-Map `map_run`) reports poses in the saved map's frame. They are scored in
+A localization run (RTAB-Map `map_run`; ORB-SLAM3 / SP_SLAM3 `load_map`) reports poses in the saved
+map's frame. For ORB-SLAM3 / SP_SLAM3, the per-frame poses (`frame_log.csv`) are mapped to the mapping
+run's final frame with the driver's `T_final_map`. A frame counts as localized only if it is tracked
+in the loaded map. In merge mode, frames of the separate new map before the merge have no pose and
+are not localized; `localization_events` there is the merge. Relocalize-only runs have no odometry
+prior, so `error_prior_only` is empty. They are scored in
 that **fixed frame**: the map->GT transform is the rigid SE(3) alignment of the *mapping* run's final
 trajectory (its `eval/metrics.json`, which must be one coordinate session), never fitted on the
 localization run. Fitting it per traversal would hide localizations into the wrong part of the map.

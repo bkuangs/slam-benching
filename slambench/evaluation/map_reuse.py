@@ -60,7 +60,8 @@ def fixed_alignment_from(map_run: Path) -> Dict[str, Any]:
 
 def map_reuse_metrics(log_rows: List[Dict[str, Any]], input_ts: np.ndarray, gt_sensor: Trajectory,
                       fixed: Dict[str, Any], cfg: Dict[str, Any], run_status: Dict[str, Any],
-                      map_info: Dict[str, Any], max_dt_s: float, out_dir: Path = None) -> Dict[str, Any]:
+                      map_info: Dict[str, Any], max_dt_s: float, out_dir: Path = None,
+                      prior_note: str = None) -> Dict[str, Any]:
     c = dict(DEFAULT_MAP_REUSE)
     c.update(cfg or {})
     input_ts = np.asarray(input_ts, dtype=np.int64)
@@ -185,15 +186,29 @@ def map_reuse_metrics(log_rows: List[Dict[str, Any]], input_ts: np.ndarray, gt_s
     lt = np.array([by_ts[r["timestamp_ns"]][1] for r in rows if r["localized"]])
     lr = np.array([by_ts[r["timestamp_ns"]][2] for r in rows if r["localized"]])
     lt, lr = lt[~np.isnan(lt)], lr[~np.isnan(lr)]
-    res["error_fixed_frame"] = ({"n_samples": int(len(lt)), "translation_m": _stats(lt),
-                                 "rotation_deg": _stats(lr) if len(lr) else unavailable("no orientation")}
+    res["error_fixed_frame"] = ({"n_samples": int(len(lt)), "translation_m": _stats_p95(lt),
+                                 "rotation_deg": _stats_p95(lr) if len(lr) else unavailable("no orientation")}
                                 if len(lt) else unavailable("no localized pose matched to ground truth"))
     pt = np.array([by_ts[r["timestamp_ns"]][1] for r in rows if not r["localized"]])
     pt = pt[~np.isnan(pt)]
     res["error_prior_only"] = ({"n_samples": int(len(pt)), "translation_m": _stats(pt),
-                                "note": "before the first localization: RTAB-Map's prior (last pose saved "
-                                        "in the map + odometry); not counted as localized"}
+                                "note": prior_note or "poses reported without a localization; not counted "
+                                                      "as localized"}
                                if len(pt) else None)
+
+    # ---- lost streaks: longest run of consecutive input frames without a localized pose
+    loc_ts = {r["timestamp_ns"] for r in rows if r["localized"]}
+    flags = np.array([t in loc_ts for t in input_ts.tolist()], dtype=bool)
+    res["lost_streaks"] = _lost_streaks(flags, own, first is not None and
+                                        int(np.searchsorted(input_ts, first["timestamp_ns"])))
+
+    # ---- estimator-specific per-frame flags (ORB-SLAM3 family: visual-odometry-only frames)
+    if any("vo_only" in r for r in log_rows):
+        n_loc = int(flags.sum())
+        n_vo = sum(1 for r in log_rows if r.get("vo_only") and r["localized"])
+        res["vo_only"] = {"n_frames": n_vo, "fraction_of_localized": n_vo / n_loc if n_loc else None,
+                          "note": "localization-mode frames tracked mostly with visual-odometry points "
+                                  "(too few map-point matches): pose may drift from the map"}
 
     # ---- computation
     tt = np.array([r["track_time_s"] for r in log_rows])
@@ -222,6 +237,28 @@ def map_reuse_metrics(log_rows: List[Dict[str, Any]], input_ts: np.ndarray, gt_s
         except Exception as exc:  # noqa: BLE001
             res["plot"] = f"failed: {exc}"
     return res
+
+
+def _stats_p95(x: np.ndarray) -> Dict[str, Any]:
+    return {**_stats(x), "p95": float(np.percentile(x, 95))}
+
+
+def _lost_streaks(flags: np.ndarray, own: np.ndarray, first_idx) -> Dict[str, Any]:
+    """Longest run of not-localized frames, over the whole input and after the first localization."""
+    def longest(f, w):
+        best_n, best_s, n, s = 0, 0.0, 0, 0.0
+        for ok, dt in zip(f.tolist(), w.tolist()):
+            if ok:
+                n, s = 0, 0.0
+            else:
+                n, s = n + 1, s + dt
+                if n > best_n:
+                    best_n, best_s = n, s
+        return {"frames": best_n, "duration_s": float(best_s)}
+    out = {"overall": longest(flags, own)}
+    out["after_first_localization"] = (longest(flags[first_idx:], own[first_idx:])
+                                       if first_idx is not False and first_idx is not None else None)
+    return out
 
 
 def _plot(path: Path, rows, err_t, ts, t0, events, c) -> str:

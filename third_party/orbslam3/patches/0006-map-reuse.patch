@@ -1,0 +1,331 @@
+diff --git a/include/System.h b/include/System.h
+index 4d4816d..401d92a 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -202,6 +202,34 @@ public:
+     // are expressed in that trajectory's world frame (in_final_frame=1); other maps stay in their own
+     // frames (in_final_frame=0). Call after Shutdown(). Returns false if nothing could be written.
+     bool SaveSparseMapSlambench(const std::string &dir);
++    // slam-benching patch (map reuse): the map an atlas loaded at construction contributes to
++    // localization, i.e. the loaded map with the most keyframes (the map SaveTrajectoryEuRoC exported
++    // when the atlas was saved). T_final_map maps that map's world frame to the frame of the saved
++    // session's trajectory_euroc.txt (its lowest-id keyframe, as SaveTrajectoryEuRoC). Call right
++    // after construction; returns false if no atlas was loaded or it holds no keyframes.
++    struct LoadedMapInfo {
++        const void* map = nullptr;
++        long unsigned int map_id = 0;
++        long unsigned int origin_kf_id = 0;
++        long unsigned int n_maps = 0;          // non-empty maps in the loaded atlas
++        long unsigned int n_keyframes = 0;
++        long unsigned int n_map_points = 0;
++        long unsigned int n_keyframes_atlas = 0;
++        long unsigned int n_map_points_atlas = 0;
++        Sophus::SE3f T_final_map;
++    };
++    bool GetLoadedMapInfo(LoadedMapInfo &info);
++    // slam-benching patch (map reuse): relocalization-only use of the loaded atlas. Makes the loaded
++    // map with the most keyframes the active map (dropping the empty map the constructor created),
++    // activates localization mode and starts tracking LOST, so every frame relocalizes against the
++    // loaded map (DBoW2 keyframe database) until tracking succeeds; tracking never initializes a new
++    // map and inserts no keyframes. Returns false if no atlas was loaded.
++    bool StartRelocalizationInLoadedMap();
++    // slam-benching patch: true if the frame just tracked was relocalized (Tracking::Relocalization
++    // succeeded on it); true if it was tracked with "visual odometry" points only (localization mode,
++    // too few map-point matches).
++    bool RelocalizedThisFrame();
++    bool TrackingVisualOdometryOnly();
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+@@ -286,6 +314,7 @@ private:
+     //
+     string mStrLoadAtlasFromFile;
+     string mStrSaveAtlasToFile;
++    bool mbLoadedAtlas = false;  // slam-benching patch
+ 
+     string mStrVocabularyFilePath;
+ 
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 863c98e..7cbb7cc 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -87,6 +87,10 @@ public:
+ 
+     // Use this function if you have deactivated local mapping and you only want to localize the camera.
+     void InformOnlyTracking(const bool &flag);
++    // slam-benching patch (map reuse): relocalization-only tracking against the active (loaded) map.
++    void SetRelocalizeOnly(const bool &flag);
++    bool RelocalizedThisFrame();
++    bool VisualOdometryOnly() const { return mbVO; }
+ 
+     void UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame);
+     KeyFrame* GetLastKeyFrame()
+@@ -160,6 +164,9 @@ public:
+ 
+     // True if local mapping is deactivated and we are performing only localization
+     bool mbOnlyTracking;
++    // slam-benching patch: never initialize/create maps; relocalize whenever not tracking.
++    bool mbRelocOnly = false;
++    bool mbRelocalizedThisFrame = false;  // slam-benching patch
+ 
+     void Reset(bool bLocMap = false);
+     void ResetActiveMap(bool bLocMap = false);
+diff --git a/src/Map.cc b/src/Map.cc
+index f1f8cd0..7dad759 100644
+--- a/src/Map.cc
++++ b/src/Map.cc
+@@ -359,7 +359,10 @@ void Map::SetLastMapChange(int currentChangeId)
+ void Map::PreSave(std::set<GeometricCamera*> &spCams)
+ {
+     int nMPWithoutObs = 0;
+-    for(MapPoint* pMPi : mspMapPoints)
++    // slam-benching patch: iterate a copy; EraseObservation can set a point bad, which erases it from
++    // mspMapPoints while the loop iterates it.
++    const std::set<MapPoint*> spMPsCopy = mspMapPoints;
++    for(MapPoint* pMPi : spMPsCopy)
+     {
+         if(!pMPi || pMPi->isBad())
+             continue;
+diff --git a/src/MapPoint.cc b/src/MapPoint.cc
+index 1cf802c..3ec5c69 100644
+--- a/src/MapPoint.cc
++++ b/src/MapPoint.cc
+@@ -586,10 +586,9 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
+             mBackupObservationsId1[it->first->mnId] = get<0>(it->second);
+             mBackupObservationsId2[it->first->mnId] = get<1>(it->second);
+         }
+-        else
+-        {
+-            EraseObservation(pKFi);
+-        }
++        // slam-benching patch: observations by keyframes that are not saved are skipped instead of
++        // erased here (upstream called EraseObservation inside this loop over mObservations, which
++        // invalidates the iterator and segfaulted SaveAtlas on long sequences).
+     }
+ 
+     // Save the id of the reference KF
+@@ -597,6 +596,11 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
+     {
+         mBackupRefKFId = mpRefKF->mnId;
+     }
++    else if(!mBackupObservationsId1.empty())
++    {
++        // slam-benching patch: reference keyframe not saved -> first saved observing keyframe.
++        mBackupRefKFId = mBackupObservationsId1.begin()->first;
++    }
+ }
+ 
+ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsigned int, MapPoint*>& mpMPid)
+diff --git a/src/System.cc b/src/System.cc
+index a217642..cc443f0 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -167,6 +167,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+         //cout << "KF in DB: " << mpKeyFrameDatabase->mnNumKFs << "; words: " << mpKeyFrameDatabase->mnNumWords << endl;
+ 
+         loadedAtlas = true;
++        mbLoadedAtlas = true;
+ 
+         mpAtlas->CreateNewMap();
+ 
+@@ -547,6 +548,10 @@ void System::Shutdown()
+ 
+     if(!mStrSaveAtlasToFile.empty())
+     {
++        // slam-benching patch: let local mapping, loop closing and a running global BA finish before
++        // serializing, so the saved atlas is the final map (upstream saves while they may still run).
++        while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
++            usleep(5000);
+         Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
+         SaveAtlas(FileType::BINARY_FILE);
+     }
+@@ -1395,6 +1400,88 @@ void System::SetPlaceRecognitionLog(const std::string &path)
+     mpLoopCloser->SetPlaceRecognitionLog(path);
+ }
+ 
++static Map* SlambenchLargestMap(Atlas* pAtlas, Map* pExclude = nullptr)
++{
++    // Same choice as SaveTrajectoryEuRoC: first map (atlas order) with the most keyframes.
++    Map* pBiggerMap = nullptr;
++    size_t numMaxKFs = 0;
++    for(Map* pMap : pAtlas->GetAllMaps())
++    {
++        if(pMap == pExclude)
++            continue;
++        if(pMap->GetAllKeyFrames().size() > numMaxKFs)
++        {
++            numMaxKFs = pMap->GetAllKeyFrames().size();
++            pBiggerMap = pMap;
++        }
++    }
++    return pBiggerMap;
++}
++
++bool System::GetLoadedMapInfo(LoadedMapInfo &info)
++{
++    if(!mbLoadedAtlas)
++        return false;
++    Map* pMap = SlambenchLargestMap(mpAtlas);
++    if(!pMap)
++        return false;
++    info.map = pMap;
++    info.map_id = pMap->GetId();
++    KeyFrame* pOrigin = pMap->GetOriginKF();
++    info.origin_kf_id = pOrigin ? pOrigin->mnId : 0;
++    info.n_keyframes = pMap->KeyFramesInMap();
++    info.n_map_points = pMap->MapPointsInMap();
++    info.n_maps = 0;
++    info.n_keyframes_atlas = 0;
++    info.n_map_points_atlas = 0;
++    for(Map* pMi : mpAtlas->GetAllMaps())
++    {
++        if(pMi->KeyFramesInMap() == 0)
++            continue;
++        ++info.n_maps;
++        info.n_keyframes_atlas += pMi->KeyFramesInMap();
++        info.n_map_points_atlas += pMi->MapPointsInMap();
++    }
++    vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
++    sort(vpKFs.begin(), vpKFs.end(), KeyFrame::lId);
++    Sophus::SE3f Twb;
++    if (mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO || mSensor==IMU_RGBD)
++        Twb = vpKFs[0]->GetImuPose();
++    else
++        Twb = vpKFs[0]->GetPoseInverse();
++    info.T_final_map = Twb.inverse();
++    return true;
++}
++
++bool System::StartRelocalizationInLoadedMap()
++{
++    if(!mbLoadedAtlas)
++        return false;
++    Map* pEmpty = mpAtlas->GetCurrentMap();  // created by the constructor after loading
++    Map* pMap = SlambenchLargestMap(mpAtlas, pEmpty);
++    if(!pMap)
++        return false;
++    mpAtlas->ChangeMap(pMap);
++    if(pEmpty && pEmpty != pMap && pEmpty->KeyFramesInMap() == 0)
++    {
++        mpAtlas->SetMapBad(pEmpty);
++        mpAtlas->RemoveBadMaps();
++    }
++    mpTracker->SetRelocalizeOnly(true);
++    ActivateLocalizationMode();
++    return true;
++}
++
++bool System::RelocalizedThisFrame()
++{
++    return mpTracker->RelocalizedThisFrame();
++}
++
++bool System::TrackingVisualOdometryOnly()
++{
++    return mpTracker->mbOnlyTracking && mpTracker->VisualOdometryOnly();
++}
++
+ System::MapFrameInfo System::GetCurrentMapFrameInfo()
+ {
+     MapFrameInfo info;
+@@ -1511,7 +1598,8 @@ void System::SaveAtlas(int type){
+         // Save the current session
+         mpAtlas->PreSave();
+ 
+-        string pathSaveFileName = "./";
++        // slam-benching patch: absolute paths are used as given (upstream always prepends "./").
++        string pathSaveFileName = (!mStrSaveAtlasToFile.empty() && mStrSaveAtlasToFile[0] == '/') ? "" : "./";
+         pathSaveFileName = pathSaveFileName.append(mStrSaveAtlasToFile);
+         pathSaveFileName = pathSaveFileName.append(".osa");
+ 
+@@ -1550,7 +1638,8 @@ bool System::LoadAtlas(int type)
+     string strFileVoc, strVocChecksum;
+     bool isRead = false;
+ 
+-    string pathLoadFileName = "./";
++    // slam-benching patch: absolute paths are used as given (upstream always prepends "./").
++    string pathLoadFileName = (!mStrLoadAtlasFromFile.empty() && mStrLoadAtlasFromFile[0] == '/') ? "" : "./";
+     pathLoadFileName = pathLoadFileName.append(mStrLoadAtlasFromFile);
+     pathLoadFileName = pathLoadFileName.append(".osa");
+ 
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..f670ae1 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -1809,6 +1809,8 @@ void Tracking::Track()
+         return;
+     }
+ 
++    mbRelocalizedThisFrame = false;  // slam-benching patch
++
+     Map* pCurrentMap = mpAtlas->GetCurrentMap();
+     if(!pCurrentMap)
+     {
+@@ -1862,6 +1864,10 @@ void Tracking::Track()
+     if(mState==NO_IMAGES_YET)
+     {
+         mState = NOT_INITIALIZED;
++        // slam-benching patch: relocalization-only mode never initializes a map; start lost so the
++        // first frame already relocalizes against the loaded map.
++        if(mbRelocOnly)
++            mState = LOST;
+     }
+ 
+     mLastProcessedState=mState;
+@@ -2036,7 +2042,9 @@ void Tracking::Track()
+         else
+         {
+             // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
+-            if(mState==LOST)
++            // slam-benching patch: in relocalization-only mode a frame that lost tracking relocalizes
++            // (upstream keeps extrapolating the motion model in RECENTLY_LOST and never relocalizes).
++            if(mState==LOST || (mbRelocOnly && mState==RECENTLY_LOST))
+             {
+                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
+@@ -2162,6 +2170,10 @@ void Tracking::Track()
+                 mTimeStampLost = mCurrentFrame.mTimeStamp;
+             //}
+         }
++        // slam-benching patch: relocalization-only mode has no "recently lost" extrapolation; a frame
++        // not tracked against the map is lost (no pose) and the next frame relocalizes.
++        if(mbRelocOnly && !bOK)
++            mState = LOST;
+ 
+         // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
+         if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
+@@ -2268,7 +2280,8 @@ void Tracking::Track()
+         }
+ 
+         // Reset if the camera get lost soon after initialization
+-        if(mState==LOST)
++        // slam-benching patch: never reset or create maps in relocalization-only mode.
++        if(mState==LOST && !mbRelocOnly)
+         {
+             if(pCurrentMap->KeyFramesInMap()<=10)
+             {
+@@ -3770,6 +3783,7 @@ bool Tracking::Relocalization()
+     else
+     {
+         mnLastRelocFrameId = mCurrentFrame.mnId;
++        mbRelocalizedThisFrame = true;  // slam-benching patch
+         cout << "Relocalized!!" << endl;
+         return true;
+     }
+@@ -3977,6 +3991,16 @@ void Tracking::InformOnlyTracking(const bool &flag)
+     mbOnlyTracking = flag;
+ }
+ 
++void Tracking::SetRelocalizeOnly(const bool &flag)
++{
++    mbRelocOnly = flag;
++}
++
++bool Tracking::RelocalizedThisFrame()
++{
++    return mbRelocalizedThisFrame;
++}
++
+ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame)
+ {
+     Map * pMap = pCurrentKeyFrame->GetMap();

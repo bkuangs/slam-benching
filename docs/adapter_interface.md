@@ -171,6 +171,65 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   TorchScript fuser loads at run time. LunaPolaris (V100, `lunapolaris_seq{01,11}_spslam3_stereo`):
   ATE 0.050 / 0.091 m against ORB-SLAM3 lean's 0.031 / 0.081 m. Tracking held for every frame in a
   single map, at a mean of 0.11–0.13 s per frame (about 4–5× slower than ORB-SLAM3).
+  **Map reuse** (ORB-SLAM3 visual modes and SP_SLAM3; `slambench/algorithms/orbslam3_map_reuse.py`,
+  results in `docs/results/map_reuse.md`). Settings, all optional; when none is given, the settings
+  file and command line are byte-identical to before:
+  `save_map: true` (session A) adds `System.SaveAtlasToFile` and the atlas is written at shutdown
+  to `algorithm/atlas.osa` (`extra.saved_map`: path, size, sha256, final-map keyframe / map-point
+  counts; the run fails with `missing_output` if it was not written). `load_map: <path>` (session B)
+  is the mapping run directory, its `algorithm/` directory, the `.osa` file, or a config's output
+  directory (`runs/<config name>`, which resolves to its latest successful run with an atlas,
+  recorded in `config.resolved.yaml`). It adds `System.LoadAtlasFromFile` and a read-only bind of
+  the atlas directory. The adapter rejects an atlas from another estimator, or one built with
+  different feature / stereo settings. `reuse_mode: relocalize` (default) passes
+  `--relocalize-only`: tracking starts lost in the loaded map, relocalizes whenever it is not
+  tracking (DBoW keyframe database), never creates a map or keyframe, and local mapping is stopped
+  (`ActivateLocalizationMode`). `reuse_mode: merge` is stock multi-session mapping: a new map
+  is started and may be merged into the loaded one by place recognition (needs
+  `loop_closure: true`; `save_map: true` with merge saves the multi-session atlas). The driver
+  writes `loaded_map.json`:
+  * the loaded map id, size and load / initialization time;
+  * `T_final_map`, which takes the loaded map's coordinates into the frame of the mapping run's
+    final trajectory;
+  * `loaded_map/keyframes.csv`, which must equal the mapping run's final keyframes
+    (`map_frame_check`; the run fails otherwise, and also if the atlas file changed).
+
+  It also adds three `frame_log.csv` columns: `in_loaded_map` (the active map is the loaded one; in
+  merge mode it becomes 1 once the new map was merged into it), `relocalized` (relocalization
+  succeeded on this frame) and `vo_only` (localization-mode visual odometry, too few map matches).
+  `extra.map_reuse` records the atlas hash before / after, `map_frame_check`, the first
+  localization and merge frame, and the number of localized poses. A run that never localizes in
+  the loaded map ends with `init_failure`. Patch 0006 (both estimators) implements this:
+  * relocalize-only tracking;
+  * absolute atlas paths;
+  * an atlas save that waits for local mapping / loop closing / global BA to finish;
+  * a fix for upstream's `MapPoint::PreSave`, which erased observations while iterating over them
+    and crashed when saving long sessions.
+
+  For SP_SLAM3 it also:
+  * re-enables the fork's disabled atlas save / load;
+  * serializes what the fork never saved (right-image keypoints and `NLeft`/`NRight`, DBoW3 BoW
+    vectors, cameras, map origins);
+  * initializes `Tracking::bStepByStep`, which was uninitialized and hung tracking after a load.
+
+  It also fixes three upstream SP_SLAM3 bugs, only reachable in sessions that load an atlas:
+  * `Relocalization()` never counted its PnP candidates, so SP_SLAM3 can never relocalize;
+  * the relocalization's guided search (`SPmatcher::SearchByProjection(Frame, KeyFrame, ...)`,
+    dead code upstream) wrote `mvpMapPoints[-1]` when no candidate was in the window (heap
+    corruption, crash) and kept ORB Hamming thresholds 100 / 64, which every SuperPoint L2
+    distance passes; it now uses the SP thresholds;
+  * BoW place recognition projected an empty map-point list, so it can never verify a loop or a
+    merge. The fix applies to merge candidates only. Loop candidates keep upstream behaviour:
+    with loop verification also enabled (image `spslam3_9439971_r2.sif`), SP_SLAM3's loop
+    correction, never exercised upstream, corrupted the loaded map (see
+    `docs/results/map_reuse.md`).
+
+  Because these fixes apply only to atlas-loading sessions, SP_SLAM3 runs without
+  `load_map` (including all earlier results) keep upstream behaviour: no relocalization and no
+  loop closure. Images:
+  * `orbslam3_4452a3c_driver3.sif` and `spslam3_9439971_r3.sif` contain patch 0006;
+  * the older images `orbslam3_4452a3c.sif` and `spslam3_9439971.sif` are still accepted for
+    configs without map reuse (`legacy_driver_source` in `version_info`).
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

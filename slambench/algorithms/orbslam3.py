@@ -37,6 +37,7 @@ import numpy as np
 
 from ..trajectory import Trajectory, invert_T, write_tum
 from ..types import RunStatus, SensorMode
+from . import orbslam3_map_reuse as mr
 from .base import (FRAME_DIAGNOSTICS_COLUMNS, AlgorithmAdapter, AlgorithmOutput, RunContext,
                    TrajectoryOutput)
 
@@ -49,6 +50,11 @@ OK_STATES = {2, 5}
 POSE_COLUMNS = ("tx", "ty", "tz", "qx", "qy", "qz", "qw")
 DRIVER_SOURCES = ("slambench_driver.cc", "slambench_preprocess.h")
 DRIVER_SOURCE_DIR = Path(__file__).resolve().parents[2] / "third_party" / "orbslam3"
+# Images built from an older driver / patch set that still produce identical results for configs
+# without map reuse (the driver and patch 0006 only add behaviour behind the map-reuse settings).
+LEGACY_DRIVER_SOURCE_SHA1 = {
+    "f11551745c3712629ce54436cbcc9eec685d5992": "orbslam3_4452a3c.sif: before map reuse (patch 0006)",
+}
 
 
 def driver_source_sha1() -> Optional[str]:
@@ -109,11 +115,16 @@ class OrbSlam3Adapter(AlgorithmAdapter):
         return self.options.get("apptainer") or shutil.which("apptainer") or "apptainer"
 
     def resolve_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        unknown = set(settings) - set(DEFAULT_SETTINGS)
+        unknown = set(settings) - set(DEFAULT_SETTINGS) - set(mr.MAP_REUSE_DEFAULTS)
         if unknown:
             raise ValueError(f"unknown orbslam3 settings: {sorted(unknown)}")
         out = dict(DEFAULT_SETTINGS)
+        # Map-reuse keys are only added to the resolved settings when used (keeps old configs identical).
+        if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
+            out.update(mr.MAP_REUSE_DEFAULTS)
         out.update(settings)
+        if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
+            mr.resolve_map_reuse_settings(out)
         if not float(out["clahe_clip_limit"]) > 0:
             raise ValueError(f"clahe_clip_limit must be > 0, got {out['clahe_clip_limit']}")
         if int(out["clahe_tile_grid"]) != out["clahe_tile_grid"] or int(out["clahe_tile_grid"]) < 1:
@@ -141,7 +152,21 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                 problems.append(f"camera model {cam.model} not supported by ORB-SLAM3 adapter")
         if stereo and calib.left.model == "pinhole" and not calib.left.rectified:
             problems.append("unrectified pinhole stereo is not implemented in the adapter yet")
+        problems += self._map_reuse_validate(mode, settings)
         return problems
+
+    def _map_reuse_validate(self, mode, settings) -> List[str]:
+        if not mr.uses_map_reuse(settings):
+            return []
+        problems = []
+        if getattr(self, "_legacy_driver", None):
+            problems.append(f"map reuse needs an image built from this repository's driver; {self.container} "
+                            f"is {self._legacy_driver}")
+        if mode.is_inertial:
+            problems.append("map reuse is implemented for visual-only modes")
+        if mr.loading(settings) and settings["reuse_mode"] == "merge" and not settings["loop_closure"]:
+            problems.append("reuse_mode: merge needs loop_closure: true (map merging is part of loop closing)")
+        return problems + mr.map_reuse_problems(self.name, settings)
 
     def estimate_frame(self, mode: SensorMode) -> str:
         return "imu" if mode.is_inertial else "cam0"
@@ -185,8 +210,11 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             raise RuntimeError(f"container ORB-SLAM3 commit {commit} != pinned {ORBSLAM3_COMMIT}")
         info["expected_driver_source_sha1"] = expected = driver_source_sha1()
         found = info.get("container_versions", {}).get("driver_source_sha1")
+        self._legacy_driver = None
+        if commit and expected and found != expected and found in LEGACY_DRIVER_SOURCE_SHA1:
+            self._legacy_driver = info["legacy_driver_source"] = LEGACY_DRIVER_SOURCE_SHA1[found]
         # Only judge a readable image (a missing image is reported by validate()).
-        if commit and expected and found != expected:
+        elif commit and expected and found != expected:
             raise RuntimeError(f"container driver source {found or '(not recorded)'} differs from this "
                                f"repository's driver {expected}; rebuild the image with "
                                "third_party/orbslam3/build_container.sh")
@@ -257,11 +285,14 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                       "Viewer.PointSize: 2.0\nViewer.CameraSize: 0.08\nViewer.CameraLineWidth: 3.0\n"
                       "Viewer.ViewpointX: 0.0\nViewer.ViewpointY: -0.7\nViewer.ViewpointZ: -1.8\n"
                       "Viewer.ViewpointF: 500.0\n")
+        for line in mr.settings_yaml_lines(s, ctx.algo_dir):
+            yaml_text += line + "\n"
         return yaml_text
 
     def prepare(self, ctx: RunContext) -> None:
         ctx.algo_dir.mkdir(parents=True, exist_ok=True)
         (ctx.algo_dir / "orbslam3_settings.yaml").write_text(self._settings_yaml(ctx))
+        mr.prepare(ctx.settings, ctx.algo_dir)
 
     def _binds(self, ctx: RunContext) -> List[str]:
         paths = {ctx.prepared.directory.resolve(), ctx.algo_dir.resolve()}
@@ -279,6 +310,7 @@ class OrbSlam3Adapter(AlgorithmAdapter):
         cmd = [self.apptainer, "exec", "--cleanenv"]
         for b in self._binds(ctx):
             cmd += ["-B", b]
+        cmd += mr.bind(s)
         cmd += [str(self.container), "/opt/slambench/bin/orbslam3_driver",
                 "/opt/ORB_SLAM3/Vocabulary/ORBvoc.txt",
                 str((ctx.algo_dir / "orbslam3_settings.yaml").resolve()),
@@ -289,7 +321,7 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                     "--clahe-tile", str(int(s["clahe_tile_grid"]))]
         if s["log_features"]:
             cmd.append("--log-features")
-        return cmd
+        return cmd + mr.command_args(s)
 
     # ---- outputs -----------------------------------------------------------
     @staticmethod
@@ -327,6 +359,10 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                     except ValueError:
                         pass
                 row["pose"] = pose
+                # Map-reuse columns (only written when an atlas was loaded).
+                for k in ("in_loaded_map", "relocalized", "vo_only"):
+                    if r.get(k) not in (None, ""):
+                        row[k] = r[k] == "1"
                 rows.append(row)
         return rows, malformed
 
@@ -434,6 +470,11 @@ class OrbSlam3Adapter(AlgorithmAdapter):
                  "per_frame_time": bool(log_rows), "online_pose": bool(online)}
         extra.update({"n_frames_input": int(len(frames_ts)), "n_frames_logged": len(log_rows),
                       "n_frames_tracking_ok": n_ok, "n_final_poses": len(final_ts)})
+        if mr.uses_map_reuse(ctx.settings):
+            extra.update(mr.collect_map_reuse(ctx.settings, d, log_rows))
+            for key, name in (("saved_atlas", "atlas.osa"), ("loaded_map", "loaded_map.json")):
+                if (d / name).exists():
+                    artifacts[key] = d / name
 
         common = dict(trajectory=traj_path, estimate_frame=self.estimate_frame(ctx.mode),
                       frame_diagnostics=diag_path, diagnostics_available=avail, extra=extra,
@@ -446,6 +487,18 @@ class OrbSlam3Adapter(AlgorithmAdapter):
             if driver_status.get("status") and driver_status["status"] != "completed":
                 msg += f"; driver status {driver_status['status']}: {driver_status.get('message', '')}"
             return AlgorithmOutput(RunStatus.CRASH, msg, **common)
+        reuse = extra.get("map_reuse")
+        if reuse is not None:
+            if not reuse["atlas_unchanged"]:
+                return AlgorithmOutput(RunStatus.CRASH, "the loaded atlas changed during the run", **common)
+            if reuse["map_frame_check"].get("same_frame") is False:
+                return AlgorithmOutput(RunStatus.CRASH, "loaded keyframes differ from the mapping run's final "
+                                       f"keyframes: {reuse['map_frame_check']}", **common)
+            if not reuse["n_localized_poses"]:
+                return AlgorithmOutput(RunStatus.INIT_FAILURE, "never localized in the loaded map in "
+                                       f"{len(log_rows)} frames", **common)
+        if ctx.settings.get("save_map") and not extra.get("saved_map", {}).get("exists"):
+            return AlgorithmOutput(RunStatus.MISSING_OUTPUT, "save_map: atlas.osa was not written", **common)
         if log_rows and n_ok == 0:
             return AlgorithmOutput(RunStatus.INIT_FAILURE,
                                    f"tracking never reached OK in {len(log_rows)} frames", **common)

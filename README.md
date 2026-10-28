@@ -24,6 +24,7 @@ slambench/
               map_reuse_export.py     replay of a localization run in the saved map's fixed frame
   algorithms/ base.py                 AlgorithmAdapter interface + normalized diagnostics columns
               orbslam3.py             ORB-SLAM3 via Apptainer image
+              orbslam3_map_reuse.py   atlas save / load (map reuse) for ORB-SLAM3 and SP_SLAM3
               rtabmap.py              RTAB-Map 0.23.8 (stereo) via Apptainer image; also exports maps
               fastlio.py              FAST-LIO2 (LiDAR-inertial) via Apptainer image; voxel map export
               lac.py                  Stanford LAC SLAM (SuperPoint/LightGlue stereo VO + GTSAM), GPU image
@@ -137,6 +138,13 @@ coloured by fixed-frame error, all placed with the mapping run's map->GT transfo
 the query run); accepted localizations with a line to the matched map node, rejected hypotheses, the
 query camera next to the map image it should recognize (the matched node, else the map node nearest
 its true pose and viewing direction), and fixed-frame error / localized state over time.
+
+### Map reuse (ORB-SLAM3, SP_SLAM3)
+Run a mapping config with `save_map: true` (e.g. `configs/lunapolaris_seq01_orbslam3_stereo_map.yaml`).
+Then run a `configs/*mapreuse*_{orbslam3,spslam3}_{relocalize,merge}.yaml` config. Its `load_map`
+names the mapping config's output directory, so the latest successful mapping run is used, and it
+localizes another sequence or lighting in that atlas. Submit it with
+`sbatch --dependency=afterok:<mapping job>`. Method and results: docs/results/map_reuse.md.
 
 ### Experiment config
 ```yaml

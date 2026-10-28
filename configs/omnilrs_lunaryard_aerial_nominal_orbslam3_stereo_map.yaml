@@ -1,0 +1,37 @@
+# Map reuse, session A: orbslam3 stereo maps the OmniLRS Lunaryard aerial survey, lighting 'nominal' and saves the atlas (save_map). Otherwise
+# identical to configs/omnilrs_lunaryard_aerial_nominal_orbslam3_stereo.yaml. Session-B configs load it: configs/*mapreuse*_orbslam3_*.yaml.
+# See docs/results/map_reuse.md.
+#   sbatch -p ice-cpu --constraint=gold6226 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_nominal_orbslam3_stereo_map.yaml
+name: omnilrs_lunaryard_aerial_nominal_orbslam3_stereo_map
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: lunaryard_aerial_nominal
+
+algorithm:
+  name: orbslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c_driver3.sif
+  settings:
+    save_map: true                # session A: atlas -> algorithm/atlas.osa
+    orb_n_features: 1200
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

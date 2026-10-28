@@ -53,7 +53,6 @@ def _evaluate_kind(t: TrajectoryOutput, dataset, gt, ecfg, diag, input_ts, mode)
 
 def _map_reuse(run_dir, cfg, dataset, gt, ecfg, status, mr_info, input_ts, out_dir):
     """Fixed-frame map-reuse metrics of a localization run (see map_reuse.py)."""
-    from ..algorithms.rtabmap import RtabmapAdapter
     from .map_reuse import fixed_alignment_from, map_reuse_metrics
     if gt is None:
         return unavailable("dataset provides no ground truth for this sequence")
@@ -68,11 +67,25 @@ def _map_reuse(run_dir, cfg, dataset, gt, ecfg, status, mr_info, input_ts, out_d
             not np.allclose(fixed["T_gt_body_trajectory_frame"], T_bs, atol=1e-9):
         return unavailable("GT body->cam0 transform differs between the mapping run and this run")
     gt_sensor = Trajectory(gt.timestamps_ns, gt.positions, gt.quaternions_xyzw, gt.body_frame).transformed(T_right=T_bs)
-    rows, _ = RtabmapAdapter.read_frame_log(run_dir / "algorithm" / "frame_log.csv")
+    algo = cfg["algorithm"]["name"]
+    prior_note = None
+    if algo in ("orbslam3", "spslam3"):
+        from ..algorithms import orbslam3_map_reuse as omr
+        from ..algorithms.orbslam3 import OrbSlam3Adapter
+        log_rows, _ = OrbSlam3Adapter.read_frame_log(run_dir / "algorithm" / "frame_log.csv")
+        load = omr.read_loaded_map(run_dir / "algorithm")
+        if not load.get("T_final_map"):
+            return unavailable("no loaded_map.json (atlas not loaded?)")
+        rows = omr.map_reuse_rows(log_rows, np.array(load["T_final_map"]), mr_info.get("reuse_mode", "relocalize"))
+    else:
+        from ..algorithms.rtabmap import RtabmapAdapter
+        rows, _ = RtabmapAdapter.read_frame_log(run_dir / "algorithm" / "frame_log.csv")
+        prior_note = ("before the first localization: RTAB-Map's prior (last pose saved in the map + "
+                      "odometry); not counted as localized")
     if not rows:
         return unavailable("no frame log")
     return map_reuse_metrics(rows, input_ts, gt_sensor, fixed, ecfg.get("map_reuse"), status, mr_info,
-                             ecfg["association_max_dt_s"], out_dir)
+                             ecfg["association_max_dt_s"], out_dir, prior_note=prior_note)
 
 
 def evaluate_run(run_dir: Path, dataset=None, eval_cfg: Dict[str, Any] = None) -> Dict[str, Any]:

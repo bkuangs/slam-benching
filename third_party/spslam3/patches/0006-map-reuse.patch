@@ -1,0 +1,681 @@
+diff --git a/include/Atlas.h b/include/Atlas.h
+index b8abb67..f6c3466 100644
+--- a/include/Atlas.h
++++ b/include/Atlas.h
+@@ -53,8 +53,9 @@ class Atlas
+     template<class Archive>
+     void serialize(Archive &ar, const unsigned int version)
+     {
+-        //ar.template register_type<Pinhole>();
+-        //ar.template register_type<KannalaBrandt8>();
++        // slam-benching patch: polymorphic cameras are serialized through mvpCameras (as v1.0).
++        ar.template register_type<Pinhole>();
++        ar.template register_type<KannalaBrandt8>();
+ 
+         // Save/load the set of maps, the set is broken in libboost 1.58 for ubuntu 16.04
+         //ar & mspMaps;
+diff --git a/include/KeyFrame.h b/include/KeyFrame.h
+index e49f2a2..537f3a1 100644
+--- a/include/KeyFrame.h
++++ b/include/KeyFrame.h
+@@ -37,6 +37,20 @@
+ #include <boost/serialization/vector.hpp>
+ #include <boost/serialization/map.hpp>
+ 
++// slam-benching patch: boost serialization of the DBoW3 BoW vectors (std::map subclasses).
++namespace DBoW3 {
++template<class Archive>
++void serialize(Archive &ar, DBoW3::BowVector &v, const unsigned int)
++{
++    ar & static_cast<std::map<DBoW3::WordId, DBoW3::WordValue>&>(v);
++}
++template<class Archive>
++void serialize(Archive &ar, DBoW3::FeatureVector &v, const unsigned int)
++{
++    ar & static_cast<std::map<DBoW3::NodeId, std::vector<unsigned int> >&>(v);
++}
++}
++
+ 
+ namespace ORB_SLAM3
+ {
+@@ -256,25 +270,24 @@ class KeyFrame
+         ar & mnBackupIdCamera;
+         ar & mnBackupIdCamera2;
+ 
+-        // Fisheye variables
+-        /*ar & mvLeftToRightMatch;
+-        ar & mvRightToLeftMatch;
+-        ar & NLeft;
+-        ar & NRight;
++        // Fisheye variables (slam-benching patch: enabled, as v1.0)
++        ar & const_cast<std::vector<int>&>(mvLeftToRightMatch);
++        ar & const_cast<std::vector<int>&>(mvRightToLeftMatch);
++        ar & const_cast<int&>(NLeft);
++        ar & const_cast<int&>(NRight);
+         serializeMatrix(ar, mTlr, version);
+-        //serializeMatrix(ar, mTrl, version);
+         serializeVectorKeyPoints(ar, mvKeysRight, version);
+         ar & mGridRight;
+ 
+-        // Inertial variables
++        // Inertial variables (IMU preintegration is not serializable in this fork; map reuse is
++        // visual-only)
+         ar & mImuBias;
+-        ar & mBackupImuPreintegrated;
+         ar & mImuCalib;
+         ar & mBackupPrevKFId;
+         ar & mBackupNextKFId;
+         ar & bImu;
+         serializeMatrix(ar, Vw, version);
+-        serializeMatrix(ar, Owb, version);*/
++        serializeMatrix(ar, Owb, version);
+ 
+     }
+ 
+diff --git a/include/LoopClosing.h b/include/LoopClosing.h
+index c095ba5..485b3db 100644
+--- a/include/LoopClosing.h
++++ b/include/LoopClosing.h
+@@ -196,6 +196,15 @@ protected:
+ 
+     // Fix scale in the stereo/RGB-D case
+     bool mbFixScale;
++public:
++    // slam-benching patch: upstream DetectCommonRegionsFromBoW() projects mvpLoopMapPoints (empty until
++    // a loop was closed) instead of the candidate's covisible map points, so BoW place recognition can
++    // never verify a loop or merge. Fixed only for merge candidates of sessions that load an atlas:
++    // loop candidates and runs without map reuse keep the upstream behaviour (the loop correction that
++    // would follow was never exercised upstream and corrupted the loaded map in our tests).
++    bool mbVerifyBoWCandidates = false;
++protected:
++    bool mbBoWQueryIsMerge = false;
+ 
+ 
+     bool mnFullBAIdx;
+diff --git a/include/SPmatcher.h b/include/SPmatcher.h
+index ae1415e..908347a 100644
+--- a/include/SPmatcher.h
++++ b/include/SPmatcher.h
+@@ -59,7 +59,7 @@ public:
+ 
+     // Project MapPoints seen in KeyFrame into the Frame and search matches.
+     // Used in relocalisation (Tracking)
+-    int SearchByProjection(Frame &CurrentFrame, KeyFrame* pKF, const std::set<MapPoint*> &sAlreadyFound, const float th, const int SPdist);
++    int SearchByProjection(Frame &CurrentFrame, KeyFrame* pKF, const std::set<MapPoint*> &sAlreadyFound, const float th, const float SPdist);  // slam-benching patch: float L2 threshold
+ 
+     // Project MapPoints using a Similarity Transformation and search matches.
+     // Used in loop detection (Loop Closing)
+diff --git a/include/System.h b/include/System.h
+index 499b7d3..a4872f5 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -186,6 +186,33 @@ public:
+     // slam-benching patch: write map_points.csv / keyframes.csv of every atlas map to dir; the map
+     // SaveTrajectoryEuRoC exports is expressed in that trajectory's world frame (in_final_frame=1).
+     bool SaveSparseMapSlambench(const std::string &dir);
++    // slam-benching patch (map reuse): the map an atlas loaded at construction contributes to
++    // localization, i.e. the loaded map with the most keyframes (the map SaveTrajectoryEuRoC exported
++    // when the atlas was saved). T_final_map (4x4 CV_32F) maps that map's world frame to the frame of
++    // the saved session's trajectory_euroc.txt (its lowest-id keyframe, as SaveTrajectoryEuRoC). Call
++    // right after construction; returns false if no atlas was loaded or it holds no keyframes.
++    struct LoadedMapInfo {
++        const void* map = nullptr;
++        long unsigned int map_id = 0;
++        long unsigned int origin_kf_id = 0;
++        long unsigned int n_maps = 0;          // non-empty maps in the loaded atlas
++        long unsigned int n_keyframes = 0;
++        long unsigned int n_map_points = 0;
++        long unsigned int n_keyframes_atlas = 0;
++        long unsigned int n_map_points_atlas = 0;
++        cv::Mat T_final_map;
++    };
++    bool GetLoadedMapInfo(LoadedMapInfo &info);
++    // slam-benching patch (map reuse): relocalization-only use of the loaded atlas. Makes the loaded
++    // map with the most keyframes the active map (dropping the empty map the constructor created),
++    // activates localization mode and starts tracking LOST, so every frame relocalizes against the
++    // loaded map (DBoW3 keyframe database) until tracking succeeds; tracking never initializes a new
++    // map and inserts no keyframes. Returns false if no atlas was loaded.
++    bool StartRelocalizationInLoadedMap();
++    // slam-benching patch: true if the frame just tracked was relocalized; true if it was tracked
++    // with "visual odometry" points only (localization mode, too few map-point matches).
++    bool RelocalizedThisFrame();
++    bool TrackingVisualOdometryOnly();
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+@@ -196,13 +223,20 @@ public:
+ 
+     void ChangeDataset();
+ 
+-    //void SaveAtlas(int type);
++    // slam-benching patch (map reuse): atlas save/load re-enabled (settings System.SaveAtlasToFile /
++    // System.LoadAtlasFromFile, as ORB-SLAM3 v1.0; written at Shutdown / read at construction).
++    void SaveAtlas(int type);
+ 
+ private:
+ 
+-    //bool LoadAtlas(string filename, int type);
++    bool LoadAtlas(int type);
++
++    string CalculateCheckSum(string filename, int type);
+ 
+-    //string CalculateCheckSum(string filename, int type);
++    string mStrLoadAtlasFromFile;
++    string mStrSaveAtlasToFile;
++    string mStrVocabularyFilePath;
++    bool mbLoadedAtlas = false;
+ 
+     // Input sensor
+     eSensor mSensor;
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 7bb1674..cb6a3d0 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -87,6 +87,10 @@ public:
+ 
+     // Use this function if you have deactivated local mapping and you only want to localize the camera.
+     void InformOnlyTracking(const bool &flag);
++    // slam-benching patch (map reuse): relocalization-only tracking against the active (loaded) map.
++    void SetRelocalizeOnly(const bool &flag);
++    bool RelocalizedThisFrame();
++    bool VisualOdometryOnly() const { return mbVO; }
+ 
+     void UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame);
+     KeyFrame* GetLastKeyFrame()
+@@ -150,6 +154,13 @@ public:
+ 
+     // True if local mapping is deactivated and we are performing only localization
+     bool mbOnlyTracking;
++    // slam-benching patch: never initialize/create maps; relocalize whenever not tracking.
++    bool mbRelocOnly = false;
++    bool mbRelocalizedThisFrame = false;  // slam-benching patch
++    // slam-benching patch: upstream Relocalization() never counts its PnP candidates (nCandidates
++    // stays 0), so relocalization can never succeed. Fixed only for sessions that load an atlas,
++    // so runs without map reuse keep the upstream behaviour.
++    bool mbCountRelocCandidates = false;
+ 
+     void Reset(bool bLocMap = false);
+     void ResetActiveMap(bool bLocMap = false);
+@@ -267,7 +278,7 @@ protected:
+     Viewer* mpViewer;
+     FrameDrawer* mpFrameDrawer;
+     MapDrawer* mpMapDrawer;
+-    bool bStepByStep;
++    bool bStepByStep = false;  // slam-benching patch: was uninitialized
+ 
+     //Atlas
+     Atlas* mpAtlas;
+diff --git a/src/Atlas.cc b/src/Atlas.cc
+index a9c6334..fb9b910 100644
+--- a/src/Atlas.cc
++++ b/src/Atlas.cc
+@@ -301,20 +301,11 @@ void Atlas::PreSave()
+ 
+ void Atlas::PostLoad()
+ {
+-    mvpCameras.clear();
++    // slam-benching patch: cameras come from the serialized mvpCameras (the Pinhole/KB8 backup
++    // vectors are not serialized).
+     map<unsigned int,GeometricCamera*> mpCams;
+-    for(Pinhole* pCam : mvpBackupCamPin)
+-    {
+-        //mvpCameras.push_back((GeometricCamera*)pCam);
+-        mvpCameras.push_back(pCam);
+-        mpCams[pCam->GetId()] = pCam;
+-    }
+-    for(KannalaBrandt8* pCam : mvpBackupCamKan)
+-    {
+-        //mvpCameras.push_back((GeometricCamera*)pCam);
+-        mvpCameras.push_back(pCam);
++    for(GeometricCamera* pCam : mvpCameras)
+         mpCams[pCam->GetId()] = pCam;
+-    }
+ 
+     mspMaps.clear();
+     unsigned long int numKF = 0, numMP = 0;
+diff --git a/src/LoopClosing.cc b/src/LoopClosing.cc
+index 1cee4a8..3e5ce48 100644
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -505,6 +505,7 @@ bool LoopClosing::NewDetectCommonRegions()
+ 
+     if(!bLoopDetectedInKF && !vpLoopBowCand.empty())
+     {
++        mbBoWQueryIsMerge = false;
+         mbLoopDetected = DetectCommonRegionsFromBoW(vpLoopBowCand, mpLoopMatchedKF, mpLoopLastCurrentKF, mg2oLoopSlw, mnLoopNumCoincidences, mvpLoopMPs, mvpLoopMatchedMPs);
+     }
+     // Merge candidates
+@@ -513,6 +514,7 @@ bool LoopClosing::NewDetectCommonRegions()
+ 
+     if(!bMergeDetectedInKF && !vpMergeBowCand.empty())
+     {
++        mbBoWQueryIsMerge = true;
+         mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand, mpMergeMatchedKF, mpMergeLastCurrentKF, mg2oMergeSlw, mnMergeNumCoincidences, mvpMergeMPs, mvpMergeMatchedMPs);
+     }
+ 
+@@ -766,7 +768,9 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand,
+                 vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
+                 vector<KeyFrame*> vpMatchedKF;
+                 vpMatchedKF.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<KeyFrame*>(NULL));
+-                int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw,  mvpLoopMapPoints, mvpCurrentMatchedPoints,10);
++                int numProjMatches = (mbVerifyBoWCandidates && mbBoWQueryIsMerge)
++                    ? matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpMatchedMP, 10)
++                    : matcher.SearchByProjection(mpCurrentKF, mScw,  mvpLoopMapPoints, mvpCurrentMatchedPoints,10);
+ 
+                 if(numProjMatches >= nProjMatches)
+                 {
+diff --git a/src/Map.cc b/src/Map.cc
+index 9345f21..2564520 100644
+--- a/src/Map.cc
++++ b/src/Map.cc
+@@ -538,7 +538,10 @@ void Map::printReprojectionError(list<KeyFrame*> &lpLocalWindowKFs, KeyFrame* mp
+ void Map::PreSave(std::set<GeometricCamera*> &spCams)
+ {
+     int nMPWithoutObs = 0;
+-    for(MapPoint* pMPi : mspMapPoints)
++    // slam-benching patch: iterate a copy; EraseObservation can set a point bad, which erases it from
++    // mspMapPoints while the loop iterates it.
++    const std::set<MapPoint*> spMPsCopy = mspMapPoints;
++    for(MapPoint* pMPi : spMPsCopy)
+     {
+         if(pMPi->GetObservations().size() == 0)
+         {
+@@ -557,6 +560,7 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
+     cout << "  Bad MapPoints removed" << endl;
+ 
+     // Saves the id of KF origins
++    mvBackupKeyFrameOriginsId.clear();  // slam-benching patch
+     mvBackupKeyFrameOriginsId.reserve(mvpKeyFrameOrigins.size());
+     for(int i = 0, numEl = mvpKeyFrameOrigins.size(); i < numEl; ++i)
+     {
+@@ -636,6 +640,16 @@ void Map::PostLoad(KeyFrameDatabase* pKFDB, ORBVocabulary* pORBVoc, map<long uns
+ 
+     cout << "End to rebuild KeyFrame references" << endl;
+ 
++    // slam-benching patch: restore the initial / lowest-id / origin keyframes (as v1.0).
++    if(mnBackupKFinitialID != -1)
++        mpKFinitial = mpKeyFrameId[mnBackupKFinitialID];
++    if(mnBackupKFlowerID != -1)
++        mpKFlowerID = mpKeyFrameId[mnBackupKFlowerID];
++    mvpKeyFrameOrigins.clear();
++    mvpKeyFrameOrigins.reserve(mvBackupKeyFrameOriginsId.size());
++    for(size_t i = 0; i < mvBackupKeyFrameOriginsId.size(); ++i)
++        mvpKeyFrameOrigins.push_back(mpKeyFrameId[mvBackupKeyFrameOriginsId[i]]);
++
+     mvpBackupMapPoints.clear();
+ }
+ 
+diff --git a/src/MapPoint.cc b/src/MapPoint.cc
+index 44fe8b7..7931675 100644
+--- a/src/MapPoint.cc
++++ b/src/MapPoint.cc
+@@ -604,10 +604,9 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
+             mBackupObservationsId1[it->first->mnId] = get<0>(it->second);
+             mBackupObservationsId2[it->first->mnId] = get<1>(it->second);
+         }
+-        else
+-        {
+-            EraseObservation(pKFi);
+-        }
++        // slam-benching patch: observations by keyframes that are not saved are skipped instead of
++        // erased here (upstream called EraseObservation inside this loop over mObservations, which
++        // invalidates the iterator and segfaulted SaveAtlas on long sequences).
+     }
+ 
+     // Save the id of the reference KF
+@@ -615,6 +614,11 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
+     {
+         mBackupRefKFId = mpRefKF->mnId;
+     }
++    else if(!mBackupObservationsId1.empty())
++    {
++        // slam-benching patch: reference keyframe not saved -> first saved observing keyframe.
++        mBackupRefKFId = mBackupObservationsId1.begin()->first;
++    }
+ }
+ 
+ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsigned int, MapPoint*>& mpMPid)
+diff --git a/src/SPmatcher.cc b/src/SPmatcher.cc
+index 0c69088..bbd2fde 100644
+--- a/src/SPmatcher.cc
++++ b/src/SPmatcher.cc
+@@ -1458,7 +1458,7 @@ int SPmatcher::SearchByProjection(Frame &CurrentFrame, const Frame &LastFrame, c
+     return nmatches;
+ }
+ 
+-int SPmatcher::SearchByProjection(Frame &CurrentFrame, KeyFrame *pKF, const set<MapPoint*> &sAlreadyFound, const float th , const int SPdist)
++int SPmatcher::SearchByProjection(Frame &CurrentFrame, KeyFrame *pKF, const set<MapPoint*> &sAlreadyFound, const float th , const float SPdist)
+ {
+     int nmatches = 0;
+ 
+@@ -1541,7 +1541,9 @@ int SPmatcher::SearchByProjection(Frame &CurrentFrame, KeyFrame *pKF, const set<
+                     }
+                 }
+ 
+-                if(bestDist<=SPdist)
++                // slam-benching patch: upstream wrote mvpMapPoints[-1] (heap corruption) when no
++                // candidate was found, since bestDist starts at 2 <= SPdist.
++                if(bestIdx2>=0 && bestDist<=SPdist)
+                 {
+                     CurrentFrame.mvpMapPoints[bestIdx2]=pMP;
+                     nmatches++;
+diff --git a/src/System.cc b/src/System.cc
+index ea7b191..1a6b41a 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -91,9 +91,38 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     //Create KeyFrame Database
+     mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
+ 
++    // slam-benching patch (map reuse): optional atlas load (ORB-SLAM3 v1.0 settings keys).
++    {
++        cv::FileNode node = fsSettings["System.LoadAtlasFromFile"];
++        if(!node.empty() && node.isString())
++            mStrLoadAtlasFromFile = (string)node;
++        node = fsSettings["System.SaveAtlasToFile"];
++        if(!node.empty() && node.isString())
++            mStrSaveAtlasToFile = (string)node;
++    }
++    mStrVocabularyFilePath = strVocFile;
++
+     //Create the Atlas
+     //mpMap = new Map();
+-    mpAtlas = new Atlas(0);
++    if(mStrLoadAtlasFromFile.empty())
++    {
++        mpAtlas = new Atlas(0);
++    }
++    else
++    {
++        cout << "Initialization of Atlas from file: " << mStrLoadAtlasFromFile << endl;
++        if(!LoadAtlas(BINARY_FILE))
++        {
++            cerr << "Error to load the file, please try with other session file or vocabulary file" << endl;
++            exit(-1);
++        }
++        mpAtlas->SetKeyFrameDababase(mpKeyFrameDatabase);
++        mpAtlas->SetORBVocabulary(mpVocabulary);
++        mpAtlas->PostLoad();
++        loadedAtlas = true;
++        mbLoadedAtlas = true;
++        mpAtlas->CreateNewMap();
++    }
+     //----
+     cout << "after voc" << endl;
+     if (mSensor==IMU_STEREO || mSensor==IMU_MONOCULAR)
+@@ -108,6 +137,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     cout << "Seq. Name: " << strSequence << endl;
+     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
+                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, strSequence);
++    mpTracker->mbCountRelocCandidates = mbLoadedAtlas;  // slam-benching patch
+ 
+     // Load LightGlue model if specified in settings
+     cv::FileNode lgNode = fsSettings["LightGlue.model_path"];
+@@ -143,6 +173,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     //Initialize the Loop Closing thread and launch
+     // mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR
+     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR); // mSensor!=MONOCULAR);
++    mpLoopCloser->mbVerifyBoWCandidates = mbLoadedAtlas;  // slam-benching patch
+ 
+     // Load PlaceRecognition model (NetVLAD/CosPlace) if specified
+     cv::FileNode prNode = fsSettings["PlaceRecognition.model_path"];
+@@ -442,6 +473,16 @@ void System::Shutdown()
+ 
+     if(mpViewer)
+         pangolin::BindToContext("SP_SLAM3: Map Viewer");
++
++    if(!mStrSaveAtlasToFile.empty())
++    {
++        // slam-benching patch: let local mapping, loop closing and a running global BA finish before
++        // serializing, so the saved atlas is the final map.
++        while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
++            usleep(5000);
++        cout << "Atlas saving to file " << mStrSaveAtlasToFile << endl;
++        SaveAtlas(BINARY_FILE);
++    }
+ }
+ 
+ 
+@@ -825,6 +866,88 @@ void System::SaveDebugData(const int &initIdx)
+ }
+ 
+ 
++static Map* SlambenchLargestMap(Atlas* pAtlas, Map* pExclude = nullptr)
++{
++    // Same choice as SaveTrajectoryEuRoC: first map (atlas order) with the most keyframes.
++    Map* pBiggerMap = nullptr;
++    size_t numMaxKFs = 0;
++    for(Map* pMap : pAtlas->GetAllMaps())
++    {
++        if(pMap == pExclude)
++            continue;
++        if(pMap->GetAllKeyFrames().size() > numMaxKFs)
++        {
++            numMaxKFs = pMap->GetAllKeyFrames().size();
++            pBiggerMap = pMap;
++        }
++    }
++    return pBiggerMap;
++}
++
++bool System::GetLoadedMapInfo(LoadedMapInfo &info)
++{
++    if(!mbLoadedAtlas)
++        return false;
++    Map* pMap = SlambenchLargestMap(mpAtlas);
++    if(!pMap)
++        return false;
++    info.map = pMap;
++    info.map_id = pMap->GetId();
++    KeyFrame* pOrigin = pMap->GetOriginKF();
++    info.origin_kf_id = pOrigin ? pOrigin->mnId : 0;
++    info.n_keyframes = pMap->KeyFramesInMap();
++    info.n_map_points = pMap->MapPointsInMap();
++    info.n_maps = 0;
++    info.n_keyframes_atlas = 0;
++    info.n_map_points_atlas = 0;
++    for(Map* pMi : mpAtlas->GetAllMaps())
++    {
++        if(pMi->KeyFramesInMap() == 0)
++            continue;
++        ++info.n_maps;
++        info.n_keyframes_atlas += pMi->KeyFramesInMap();
++        info.n_map_points_atlas += pMi->MapPointsInMap();
++    }
++    vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
++    sort(vpKFs.begin(), vpKFs.end(), KeyFrame::lId);
++    cv::Mat Twb;
++    if (mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO)
++        Twb = vpKFs[0]->GetImuPose();
++    else
++        Twb = vpKFs[0]->GetPoseInverse();
++    info.T_final_map = Twb.inv();
++    return true;
++}
++
++bool System::StartRelocalizationInLoadedMap()
++{
++    if(!mbLoadedAtlas)
++        return false;
++    Map* pEmpty = mpAtlas->GetCurrentMap();  // created by the constructor after loading
++    Map* pMap = SlambenchLargestMap(mpAtlas, pEmpty);
++    if(!pMap)
++        return false;
++    mpAtlas->ChangeMap(pMap);
++    if(pEmpty && pEmpty != pMap && pEmpty->KeyFramesInMap() == 0)
++    {
++        mpAtlas->SetMapBad(pEmpty);
++        mpAtlas->RemoveBadMaps();
++    }
++    mpTracker->SetRelocalizeOnly(true);
++    ActivateLocalizationMode();
++    return true;
++}
++
++bool System::RelocalizedThisFrame()
++{
++    return mpTracker->RelocalizedThisFrame();
++}
++
++bool System::TrackingVisualOdometryOnly()
++{
++    return mpTracker->mbOnlyTracking && mpTracker->VisualOdometryOnly();
++}
++
+ System::MapFrameInfo System::GetCurrentMapFrameInfo()
+ {
+     MapFrameInfo info;
+@@ -980,10 +1103,9 @@ void System::ChangeDataset()
+     mpTracker->NewDataset();
+ }
+ 
+-/*void System::SaveAtlas(int type){
+-    cout << endl << "Enter the name of the file if you want to save the current Atlas session. To exit press ENTER: ";
+-    string saveFileName;
+-    getline(cin,saveFileName);
++void System::SaveAtlas(int type){
++    // slam-benching patch: file name from System.SaveAtlasToFile (absolute paths used as given).
++    string saveFileName = mStrSaveAtlasToFile;
+     if(!saveFileName.empty())
+     {
+         //clock_t start = clock();
+@@ -992,7 +1114,7 @@ void System::ChangeDataset()
+         mpAtlas->PreSave();
+         mpKeyFrameDatabase->PreSave();
+ 
+-        string pathSaveFileName = "./";
++        string pathSaveFileName = (saveFileName[0] == '/') ? "" : "./";
+         pathSaveFileName = pathSaveFileName.append(saveFileName);
+         pathSaveFileName = pathSaveFileName.append(".osa");
+ 
+@@ -1032,10 +1154,13 @@ void System::ChangeDataset()
+     }
+ }
+ 
+-bool System::LoadAtlas(string filename, int type)
++bool System::LoadAtlas(int type)
+ {
+     string strFileVoc, strVocChecksum;
+     bool isRead = false;
++    // slam-benching patch: file name from System.LoadAtlasFromFile (absolute paths used as given).
++    string filename = (mStrLoadAtlasFromFile[0] == '/') ? "" : "./";
++    filename = filename.append(mStrLoadAtlasFromFile).append(".osa");
+ 
+     if(type == TEXT_FILE) // File text
+     {
+@@ -1127,7 +1252,7 @@ string System::CalculateCheckSum(string filename, int type)
+     }
+ 
+     return checksum;
+-}*/
++}
+ 
+ } //namespace ORB_SLAM
+ 
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index f7c8ef3..14bcca2 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -1412,6 +1412,7 @@ void Tracking::Track()
+     mTime_NewKF_Dec = 0;
+ #endif
+     framecount++;
++    mbRelocalizedThisFrame = false;  // slam-benching patch
+     if (bStepByStep)
+     {
+         while(!mbStep)
+@@ -1473,6 +1474,10 @@ void Tracking::Track()
+     if(mState==NO_IMAGES_YET)
+     {
+         mState = NOT_INITIALIZED;
++        // slam-benching patch: relocalization-only mode never initializes a map; start lost so the
++        // first frame already relocalizes against the loaded map.
++        if(mbRelocOnly)
++            mState = LOST;
+     }
+ 
+     mLastProcessedState=mState;
+@@ -1655,7 +1660,8 @@ void Tracking::Track()
+         else
+         {
+             // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
+-            if(mState==LOST)
++            // slam-benching patch: in relocalization-only mode a frame that lost tracking relocalizes.
++            if(mState==LOST || (mbRelocOnly && mState==RECENTLY_LOST))
+             {
+                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO)
+                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
+@@ -1779,6 +1785,10 @@ void Tracking::Track()
+                 mTimeStampLost = mCurrentFrame.mTimeStamp;
+             }
+         }
++        // slam-benching patch: relocalization-only mode has no "recently lost" extrapolation; a frame
++        // not tracked against the map is lost (no pose) and the next frame relocalizes.
++        if(mbRelocOnly && !bOK)
++            mState = LOST;
+ 
+         // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
+         if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) && ((mSensor == System::IMU_MONOCULAR) || (mSensor == System::IMU_STEREO)) && pCurrentMap->isImuInitialized())
+@@ -1873,7 +1883,8 @@ void Tracking::Track()
+         }
+ 
+         // Reset if the camera get lost soon after initialization
+-        if(mState==LOST)
++        // slam-benching patch: never reset or create maps in relocalization-only mode.
++        if(mState==LOST && !mbRelocOnly)
+         {
+             if(pCurrentMap->KeyFramesInMap()<=5)
+             {
+@@ -3560,6 +3571,8 @@ bool Tracking::Relocalization()
+                 MLPnPsolver* pSolver = new MLPnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
+                 pSolver->SetRansacParameters(0.99,10,300,6,0.5,5.991);  //This solver needs at least 6 points
+                 vpMLPnPsolvers[i] = pSolver;
++                if(mbCountRelocCandidates)
++                    nCandidates++;
+             }
+         }
+     }
+@@ -3623,7 +3636,7 @@ bool Tracking::Relocalization()
+                 // If few inliers, search by projection in a coarse window and optimize again
+                 if(nGood<50)
+                 {
+-                    int nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,10,100);
++                    int nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,10,ORBmatcher::TH_HIGH);  // slam-benching patch: SP L2 thresholds instead of ORB Hamming 100 / 64
+ 
+                     if(nadditional+nGood>=50)
+                     {
+@@ -3637,7 +3650,7 @@ bool Tracking::Relocalization()
+                             for(int ip =0; ip<mCurrentFrame.N; ip++)
+                                 if(mCurrentFrame.mvpMapPoints[ip])
+                                     sFound.insert(mCurrentFrame.mvpMapPoints[ip]);
+-                            nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,3,64);
++                            nadditional =matcher2.SearchByProjection(mCurrentFrame,vpCandidateKFs[i],sFound,3,ORBmatcher::TH_LOW+0.28f*(ORBmatcher::TH_HIGH-ORBmatcher::TH_LOW));
+ 
+                             // Final optimization
+                             if(nGood+nadditional>=50)
+@@ -3670,6 +3683,7 @@ bool Tracking::Relocalization()
+     else
+     {
+         mnLastRelocFrameId = mCurrentFrame.mnId;
++        mbRelocalizedThisFrame = true;  // slam-benching patch
+         cout << "Relocalized!!" << endl;
+         return true;
+     }
+@@ -3874,6 +3888,16 @@ void Tracking::ChangeCalibration(const string &strSettingPath)
+     Frame::mbInitialComputations = true;
+ }
+ 
++void Tracking::SetRelocalizeOnly(const bool &flag)
++{
++    mbRelocOnly = flag;
++}
++
++bool Tracking::RelocalizedThisFrame()
++{
++    return mbRelocalizedThisFrame;
++}
++
+ void Tracking::InformOnlyTracking(const bool &flag)
+ {
+     mbOnlyTracking = flag;

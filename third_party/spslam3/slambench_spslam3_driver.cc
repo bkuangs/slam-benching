@@ -9,6 +9,7 @@
 // Usage:
 //   spslam3_driver <vocabulary> <settings.yaml> <mode> <input_dir> <output_dir>
 //                  [--playback-rate R] [--clahe] [--clahe-clip C] [--clahe-tile N] [--log-features]
+//                  [--relocalize-only]
 //
 //   mode: stereo | stereo_inertial | mono | mono_inertial (slam-benching only runs stereo)
 //   --playback-rate R : R > 0 throttles input to R x the recorded frame rate
@@ -19,6 +20,21 @@
 //   --clahe-clip C    : CLAHE clip limit (default 3.0; lower = gentler contrast enhancement).
 //   --clahe-tile N    : CLAHE tile grid N x N (default 8).
 //   --log-features    : write features.bin (keypoints of every frame and their map-point status).
+//   --relocalize-only : (map reuse; needs System.LoadAtlasFromFile in the settings) localize against
+//                       the loaded map only: localization mode, start lost, relocalize whenever
+//                       tracking is lost, never initialize a new map or insert keyframes (patch 0006).
+//
+// Atlas save / load (map reuse) is configured in the settings file (System.SaveAtlasToFile /
+// System.LoadAtlasFromFile, absolute paths without the .osa extension; patch 0006, which re-enables
+// the fork's disabled atlas serialization). When an atlas was loaded, the driver additionally writes
+// loaded_map.json and loaded_map/{keyframes,map_points}.csv (the loaded atlas before the first frame)
+// and frame_log.csv gets three more columns, as the ORB-SLAM3 driver:
+//   in_loaded_map  1 = the active map is the loaded map (relocalize-only: always; multi-session
+//                  mapping: after the new map was merged into it), so the pose is in the loaded
+//                  map's frame (loaded_map.json T_final_map maps it to the saved session's
+//                  trajectory_euroc.txt frame)
+//   relocalized    1 = Tracking::Relocalization succeeded on this frame
+//   vo_only        1 = localization-mode frame tracked with visual-odometry points only
 //
 // Input (input_dir):
 //   frames.csv : timestamp_ns,left_path,right_path   (right_path empty for mono)
@@ -149,13 +165,14 @@ void WriteStatus(const string &path, const string &status, const string &message
 int main(int argc, char **argv) {
     if (argc < 6) {
         cerr << "Usage: spslam3_driver <vocabulary> <settings.yaml> <mode> <input_dir> <output_dir>"
-                " [--playback-rate R] [--clahe] [--clahe-clip C] [--clahe-tile N] [--log-features]" << endl;
+                " [--playback-rate R] [--clahe] [--clahe-clip C] [--clahe-tile N] [--log-features]"
+                " [--relocalize-only]" << endl;
         return 2;
     }
     const string vocab = argv[1], settings = argv[2], mode = argv[3];
     const string input_dir = argv[4], output_dir = argv[5];
     double playback_rate = 0.0;
-    bool use_clahe = false, log_features = false;
+    bool use_clahe = false, log_features = false, relocalize_only = false;
     double clahe_clip = 3.0;
     int clahe_tile = 8;
     for (int i = 6; i < argc; ++i) {
@@ -165,6 +182,7 @@ int main(int argc, char **argv) {
         else if (a == "--clahe-clip" && i + 1 < argc) clahe_clip = atof(argv[++i]);
         else if (a == "--clahe-tile" && i + 1 < argc) clahe_tile = atoi(argv[++i]);
         else if (a == "--log-features") log_features = true;
+        else if (a == "--relocalize-only") relocalize_only = true;
         else { cerr << "Unknown argument: " << a << endl; return 2; }
     }
     const string status_path = output_dir + "/driver_status.json";
@@ -198,12 +216,52 @@ int main(int argc, char **argv) {
         return 3;
     }
 
+    const auto init_start = chrono::steady_clock::now();
     ORB_SLAM3::System SLAM(vocab, settings, sensor, false);
+    const double init_s = chrono::duration<double>(chrono::steady_clock::now() - init_start).count();
     cv::Ptr<cv::CLAHE> clahe = slambench::MakeClahe(clahe_clip, clahe_tile);
+
+    ORB_SLAM3::System::LoadedMapInfo loaded;
+    const bool map_reuse = SLAM.GetLoadedMapInfo(loaded);
+    if (relocalize_only && !map_reuse) {
+        cerr << "--relocalize-only needs a loaded atlas (System.LoadAtlasFromFile)" << endl;
+        WriteStatus(status_path, "config_error", "--relocalize-only without a loaded atlas", frames.size(), 0);
+        SLAM.Shutdown();
+        return 2;
+    }
+    if (map_reuse) {
+        if (relocalize_only && !SLAM.StartRelocalizationInLoadedMap()) {
+            WriteStatus(status_path, "config_error", "could not activate the loaded map", frames.size(), 0);
+            SLAM.Shutdown();
+            return 2;
+        }
+        const string dir = output_dir + "/loaded_map";
+        if (system(("mkdir -p '" + dir + "'").c_str()) != 0 || !SLAM.SaveSparseMapSlambench(dir))
+            cerr << "could not write the loaded map" << endl;
+        cv::Mat T;
+        loaded.T_final_map.convertTo(T, CV_64F);
+        ofstream lm(output_dir + "/loaded_map.json");
+        lm << setprecision(12) << "{\n  \"map_id\": " << loaded.map_id
+           << ",\n  \"origin_kf_id\": " << loaded.origin_kf_id
+           << ",\n  \"n_maps\": " << loaded.n_maps
+           << ",\n  \"n_keyframes\": " << loaded.n_keyframes
+           << ",\n  \"n_map_points\": " << loaded.n_map_points
+           << ",\n  \"n_keyframes_atlas\": " << loaded.n_keyframes_atlas
+           << ",\n  \"n_map_points_atlas\": " << loaded.n_map_points_atlas
+           << ",\n  \"relocalize_only\": " << (relocalize_only ? "true" : "false")
+           << ",\n  \"init_time_s\": " << init_s
+           << ",\n  \"T_final_map\": [";
+        for (int r = 0; r < 4; ++r) {
+            lm << (r ? ", [" : "[");
+            for (int c = 0; c < 4; ++c) lm << (c ? ", " : "") << T.at<double>(r, c);
+            lm << "]";
+        }
+        lm << "]\n}\n";
+    }
 
     ofstream log(output_dir + "/frame_log.csv");
     log << "frame_idx,timestamp_ns,state,map_id,map_changed,track_time_s,coord_session,"
-           "map_kfs,map_points,tx,ty,tz,qx,qy,qz,qw\n";
+           "map_kfs,map_points,tx,ty,tz,qx,qy,qz,qw" << (map_reuse ? ",in_loaded_map,relocalized,vo_only" : "") << "\n";
     log << fixed;
 
     ofstream feat;
@@ -289,10 +347,17 @@ int main(int argc, char **argv) {
             const Eigen::Vector3f p = -Rwc * tcw;
             const Eigen::Quaternionf q = Eigen::Quaternionf(Rwc).normalized();
             log << setprecision(9) << "," << p.x() << "," << p.y() << "," << p.z() << ","
-                << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << "\n";
+                << q.x() << "," << q.y() << "," << q.z() << "," << q.w();
         } else {
-            log << ",,,,,,,\n";
+            log << ",,,,,,,";
         }
+        if (map_reuse) {
+            // The merged map keeps the loaded Map object and origin keyframe (it takes the new map's id).
+            const bool in_loaded = info.map == loaded.map && info.has_origin && info.origin_kf_id == loaded.origin_kf_id;
+            log << "," << (in_loaded ? 1 : 0) << "," << (SLAM.RelocalizedThisFrame() ? 1 : 0)
+                << "," << (SLAM.TrackingVisualOdometryOnly() ? 1 : 0);
+        }
+        log << "\n";
         log.flush();
 
         if (log_features) {

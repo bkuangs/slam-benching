@@ -1,0 +1,54 @@
+# Map reuse, session B: spslam3 stereo on the OmniLRS aerial survey, lighting 'dim' (same trajectory as the map), reusing the atlas of configs/omnilrs_lunaryard_aerial_nominal_spslam3_stereo_map.yaml;
+# multi-session mapping (new map, merged into the loaded one by place recognition). Poses are scored in session A's fixed map frame (no re-alignment).
+# Submit after session A finished:
+#   sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 --dependency=afterok:<session A job> scripts/slurm_slambench.sbatch run configs/omnilrs_mapreuse_mapnominal_dim_spslam3_merge.yaml
+name: omnilrs_mapreuse_mapnominal_dim_spslam3_merge
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: lunaryard_aerial_dim
+
+algorithm:
+  name: spslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/spslam3_9439971_r3.sif
+  settings:
+    load_map: ~/scratch/slam-bench-work/runs/omnilrs_lunaryard_aerial_nominal_spslam3_stereo_map   # latest successful run of configs/omnilrs_lunaryard_aerial_nominal_spslam3_stereo_map.yaml
+    reuse_mode: merge
+    sp_n_features: 1200          # = orb_n_features of the ORB-SLAM3 lean config
+    sp_n_levels: 1               # SuperPoint on the full-resolution image only (SP_SLAM3 recommendation)
+    # SuperPoint confidence thresholds. The SP_SLAM3 README values (0.155 / 0.055, the adapter
+    # defaults) leave ~40 keypoints per LunaPolaris frame (low-texture regolith; ~90 even at 0.005),
+    # far below the 500 that stereo initialisation needs, so tracking never starts. These thresholds
+    # fill the same 1200-keypoint budget as ORB-SLAM3 (top-1200 NMS'd heatmap maxima, spread by the
+    # oct-tree); see docs/adapter_interface.md.
+    sp_ini_th: 0.00001
+    sp_min_th: 0.000001
+    sp_fp16: false
+    lightglue: true
+    lightglue_fp16: false
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}
+  map_reuse:                     # fixed-frame scoring in session A's map (docs/evaluation.md "Map reuse")
+    error_thresholds_m: [0.1, 0.25, 0.5, 1.0]
+    false_relocalization_m: 0.5
+    false_relocalization_deg: 15.0
+    staleness_s: [1.0, 5.0]
