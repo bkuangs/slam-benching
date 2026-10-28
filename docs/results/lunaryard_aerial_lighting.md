@@ -84,3 +84,74 @@ RPE 1 s split by trajectory part (RMSE, m):
   sensor noise / motion blur, faster or lower flight, or the sun in view (camera pitched < 30° down).
 * **Compute:** ORB-SLAM3 runs at 16–28 ms per frame on 8 CPU cores, real-time with margin. SP_SLAM3 needs
   ~160 ms per frame on a V100, 2.4× slower than 15 Hz; it was throttled, not dropping frames. LAC needs ~60 ms.
+
+## Cross-lighting relocalization (map under one lighting, query under another)
+
+`sim/omnilrs/cross_lighting_reloc.py` tests features outside of SLAM.
+
+- **Map frame:** a frame under lighting A. Its 3D points come from the GT depth and GT pose.
+- **Query frame:** the frame k steps later under lighting B. The camera has moved about 0.13 m per step.
+- **Pose estimation:** matched points go to PnP + RANSAC (3 px threshold, then LM refinement).
+- **Success:** within 0.25 m and 2°.
+- **Scale of the test:** every 10th frame is a map frame, with k ∈ {0, 8, 15, 30} and all 16 map/query lighting pairs (53,100 pairs in total).
+- **Methods** (each capped at 1200 keypoints):
+  - **orb:** OpenCV ORB, 8 levels, FAST threshold 7, Hamming ratio + mutual check.
+  - **sp_nn:** SuperPoint with mutual nearest-neighbour matching.
+  - **sp_lg / aliked_lg / disk_lg:** SuperPoint, ALIKED or DISK with LightGlue.
+- **Where it runs:** inside the LAC image on a V100.
+
+Reproduce:
+```bash
+sbatch sim/omnilrs/cross_lighting_reloc.sbatch --out <dir>   # from the repo root
+python sim/omnilrs/cross_lighting_summary.py <dir>
+```
+
+Success rate on cross-lighting pairs, by viewpoint offset:
+
+| method | 0 m | 1.1 m | 2.0 m | 4.0 m | all |
+|---|---|---|---|---|---|
+| orb | 30% | 17% | 15% | 0% | 16% |
+| sp_nn | 59% | 36% | 21% | 1% | 29% |
+| **sp_lg** | **87%** | **74%** | **56%** | **15%** | **58%** |
+| aliked_lg | 62% | 56% | 49% | 6% | 43% |
+| disk_lg | 51% | 50% | 43% | 0% | 36% |
+
+Success rate for a map built under nominal light, by query lighting (all offsets):
+
+| method | nominal | low_sun | dim | glare |
+|---|---|---|---|---|
+| orb | 71% | 12% | 71% | 0% |
+| sp_nn | 70% | 38% | 76% | 0% |
+| sp_lg | 80% | 65% | 82% | 26% |
+| aliked_lg | 71% | 74% | 79% | 5% |
+| disk_lg | 64% | 70% | 73% | 0% |
+
+Accuracy of successful cross-lighting localizations:
+
+| method | median error (cm / deg) | <5 cm and <0.5° | extract / match (ms) |
+|---|---|---|---|
+| orb | 1.6 / 0.15 | 12% | 11 / 5 |
+| sp_nn | 1.5 / 0.12 | 22% | 16 / 1 |
+| sp_lg | 3.1 / 0.21 | 35% | 13 / 18 |
+| aliked_lg | 0.6 / 0.05 | 38% | 16 / 14 |
+| disk_lg | 0.5 / 0.04 | 36% | 49 / 13 |
+
+**Findings**
+- **Changed lighting.** This is where learned features win.
+  - ORB matches across a sun-elevation change (nominal → low_sun) only 12% of the time.
+  - SuperPoint + LightGlue manages 65%, and ALIKED and DISK manage 70–74%.
+  - Dimming (same sun direction) hurts nobody, because ORB's binary tests are invariant to brightness.
+- **Glare** also changes the sun azimuth, so the shadows reverse direction. This defeats everything except SuperPoint + LightGlue: 26% from a nominal map, 75% from a low_sun map.
+- **The matcher matters as much as the detector.** The same SuperPoint keypoints go from 29% to 58% overall when nearest-neighbour matching is replaced by LightGlue.
+- **Precision when it works.**
+  - ALIKED and DISK give the most precise poses (sub-cm median).
+  - SuperPoint is the least precise (3 cm), which matches its 8 px detection cells and the drift seen in tracking.
+  - ORB's successes are precise, but rare.
+- **Implication.** For a lander mapping drone, map reuse across sun angles favours a learned front end, ideally SuperPoint + LightGlue for robustness. Frame-to-frame tracking at fixed lighting favours ORB (see the SLAM results above).
+
+**Caveats**
+- Clean renders: no noise or blur.
+- Synthetic texture that repeats every 5 m.
+- GT depth stands in for the map's 3D points, which is optimistic for every method.
+- Retrieval is perfect: the map frame is chosen by GT, not by place recognition.
+- The glare condition changes the sun azimuth as well as the elevation.
