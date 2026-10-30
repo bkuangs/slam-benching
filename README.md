@@ -43,6 +43,9 @@ scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calib
 scripts/compare_variants.py           repeated runs of config variants: outages, map continuity, shared-timestamp error
 scripts/lac_stereo_depth_probe.py     dump LAC's stereo keypoint matches (runs in the LAC container, GPU)
 scripts/stereo_depth_bias.py          stereo depth bias vs simulator GT depth or the LiDAR reference map
+scripts/flare_headroom_probe.py       flare-in-view score per frame vs stereo/temporal matches and 1-s local drift
+scripts/lidar_degeneracy_probe.py     LiDAR point-to-plane conditioning per scan: full vs ground-only crops
+scripts/fastlio_divergence_report.py  FAST-LIO2 divergence onset (speed, n_effective) and pre-divergence ATE
 vpr/, scripts/vpr_*.py                place recognition benchmark: AnyLoc/MixVPR/CosPlace vs DBoW2 retrieval + LightGlue/PnP
                                       relocalization (docs/results/place_recognition.md)
 docs/                                 adapter interface, evaluation methodology, dataset notes
@@ -197,6 +200,10 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
   RTAB-Map and FAST-LIO2 on seq01/02/11: accuracy, resources, map quality, drift diagnosis.
 * `docs/results/lunaryard_aerial_lighting.md` — simulated drone survey over the Lunaryard under 4 lightings:
   ORB-SLAM3 vs SP_SLAM3 vs LAC.
+* `docs/research/lens_flare_restoration.md` — whether to fine-tune lens-flare removal (van der Meer thesis
+  Ch. 6), flare headroom on seq11, success metrics and a staged plan.
+* `docs/research/lidar_ground_only.md` — FAST-LIO2 with ground-only LiDAR (LunaLab walls cropped): registration
+  becomes degenerate in x/y/yaw and LiDAR-inertial odometry diverges silently on seq01/02/11.
 
 ## Licences
 LunaPolaris: CC BY 4.0, © 2025 University of Luxembourg — Database by Dave van der Meer,

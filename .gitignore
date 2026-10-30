@@ -11,3 +11,6 @@ __pycache__/
 .pytest_cache/
 slambench-*.out
 /.scratch/
+
+# Reference papers kept locally (copyrighted, large)
+/dave_thesis.pdf

@@ -1,0 +1,35 @@
+# Point-count control for the ground-only runs (*_ground.yaml): full scans with the walls kept, but only every
+# 5th point of each scan (~9000 points vs ~9,400 for the ground crop). If this tracks while the ground
+# crop diverges, the cause is geometry, not point count. See docs/research/lidar_ground_only.md.
+name: lunapolaris_seq01_fastlio_lidar_inertial_decim5
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_01
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose
+    lidar_imu_source: zed2
+    lidar_keep_every_n: 5
+
+algorithm:
+  name: fastlio
+  mode: lidar_inertial
+  options:
+    container: ~/scratch/slam-bench-work/containers/fastlio_7cc4175.sif
+  settings:
+    playback_rate: 1.0
+    map_voxel: 0.02
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

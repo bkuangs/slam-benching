@@ -101,3 +101,10 @@ after the bag starts; max inter-message gaps (bag time) are 2 s for images and 3
 * `T_gt_body_sensor("lidar")` = /tf_static marker → `lidar_frame`, so trajectories in the `lidar`
   frame are evaluated against the same mocap ground truth.
 * Camera options do not enter the LiDAR cache key and vice versa. ~8 GB per sequence.
+* **Diagnostic degradations (default off).** `lidar_crop_max_height_m` / `lidar_crop_max_range_m` drop returns
+  higher than / horizontally farther than the given distance from the origin of `lidar_crop_frame`
+  (default `leo01/base_footprint`, the rover ground plane; /tf_static only, never ground truth). Zero points
+  are kept, and the end stamps and per-point offsets stay those of the full scan. With 0.5 m / 3 m this removes
+  the LunaLab walls (open-terrain LiDAR). `lidar_keep_every_n` keeps every n-th point (point-count control).
+  They enter the cache key only when set and are listed in the manifest `preprocessing`. A cropped sequence
+  is ~1.5 GB. Results: `docs/research/lidar_ground_only.md`.

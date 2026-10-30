@@ -74,13 +74,25 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     # content up. Corrects a constant left/right row misalignment of the recorded "rectified" images
     # that camera_info does not describe (sequence_11: -1.63 px; see docs/datasets/lunapolaris.md).
     "right_row_shift_px": 0.0,
+    # Ground-only LiDAR (diagnostic degradation, default off): drop returns higher than
+    # lidar_crop_max_height_m above, or horizontally farther than lidar_crop_max_range_m from, the origin
+    # of lidar_crop_frame (the rover's ground-plane frame; /tf_static only, no ground truth). Removes the
+    # LunaLab walls, which otherwise constrain LiDAR registration; see docs/research/lidar_ground_only.md.
+    "lidar_crop_frame": "leo01/base_footprint",
+    "lidar_crop_max_height_m": None,
+    "lidar_crop_max_range_m": None,
+    # Keep every n-th point of each scan in message order (default off). Point-count control for the
+    # ground-only crop: same number of points, walls kept.
+    "lidar_keep_every_n": None,
 }
 
 
 LIVOX_G = 9.80665   # Livox IMUs report acceleration in g
 
 _CAMERA_OPTIONS = ("left_topic", "right_topic", "image_format", "right_row_shift_px")
-_LIDAR_OPTIONS = ("lidar_topic", "lidar_imu_source", "lidar_imu_topic")
+_LIDAR_OPTIONS = ("lidar_topic", "lidar_imu_source", "lidar_imu_topic", "lidar_crop_frame",
+                  "lidar_crop_max_height_m", "lidar_crop_max_range_m", "lidar_keep_every_n")
+_LIDAR_CROP_OPTIONS = ("lidar_crop_frame", "lidar_crop_max_height_m", "lidar_crop_max_range_m")
 
 #: slambench LiDAR scan file (one per frame, ``lidar/<scan end ns>.bin``), little endian:
 #: 8-byte magic, int64 start_ns, uint32 n_points, uint32 record size, then n_points records.
@@ -130,6 +142,21 @@ def livox_points(msg):
     return a["t"].astype(np.int64), out
 
 
+def crop_lidar_points(pts: np.ndarray, T_crop_lidar: np.ndarray, max_height_m: Optional[float],
+                      max_range_m: Optional[float]) -> np.ndarray:
+    """Boolean keep-mask: returns at most `max_height_m` above and `max_range_m` horizontally from the
+    crop frame origin (points mapped by T_crop_lidar). Zero (no-return) points are always kept."""
+    xyz = np.c_[pts["x"], pts["y"], pts["z"]].astype(float)
+    zero = ~xyz.any(axis=1)
+    q = xyz @ T_crop_lidar[:3, :3].T + T_crop_lidar[:3, 3]
+    keep = np.ones(len(pts), bool)
+    if max_height_m is not None:
+        keep &= q[:, 2] <= max_height_m
+    if max_range_m is not None:
+        keep &= np.hypot(q[:, 0], q[:, 1]) <= max_range_m
+    return keep | zero
+
+
 def _stamp_ns(header) -> int:
     return int(header.stamp.sec) * 1_000_000_000 + int(header.stamp.nanosec)
 
@@ -166,11 +193,33 @@ class LunaPolarisAdapter(DatasetAdapter):
                              "recorded rectified images (the Zenodo JSON uses a different rectification)")
         if self.options["lidar_imu_source"] not in ("zed2", "livox"):
             raise ValueError("lunapolaris: lidar_imu_source must be 'zed2' or 'livox'")
+        for k in ("lidar_crop_max_height_m", "lidar_crop_max_range_m"):
+            v = self.options[k]
+            if v is not None and not float(v) > 0:
+                raise ValueError(f"lunapolaris: {k} must be a positive number of metres or null")
+        n = self.options["lidar_keep_every_n"]
+        if n is not None and (int(n) != n or int(n) < 1):
+            raise ValueError("lunapolaris: lidar_keep_every_n must be a positive integer or null")
+
+    def _lidar_crop(self):
+        """(T_crop_lidar, max height, max range) or None when no crop is configured."""
+        h, r = self.options["lidar_crop_max_height_m"], self.options["lidar_crop_max_range_m"]
+        if h is None and r is None:
+            return None
+        T = self.static_tf().lookup(self.options["lidar_crop_frame"], self.options["lidar_frame"])
+        if T is None:
+            raise ValueError(f"no /tf_static path {self.options['lidar_crop_frame']} -> {self.options['lidar_frame']}")
+        return T, (None if h is None else float(h)), (None if r is None else float(r))
 
     def preparation_inputs(self, mode: SensorMode) -> Dict[str, Any]:
         out = super().preparation_inputs(mode)
         if not float(self.options["right_row_shift_px"] or 0.0):
             out["options"].pop("right_row_shift_px", None)   # keeps cache keys of unshifted inputs
+        if self.options["lidar_crop_max_height_m"] is None and self.options["lidar_crop_max_range_m"] is None:
+            for k in _LIDAR_CROP_OPTIONS:                    # keeps cache keys of uncropped LiDAR inputs
+                out["options"].pop(k, None)
+        if self.options["lidar_keep_every_n"] is None:
+            out["options"].pop("lidar_keep_every_n", None)
         # each mode's cache key only depends on the options its conversion reads
         lidar = "lidar" in mode.value
         for k in (_CAMERA_OPTIONS if lidar else _LIDAR_OPTIONS):
@@ -458,6 +507,8 @@ class LunaPolarisAdapter(DatasetAdapter):
         rows, lag, spans, n_pts, n_zero = [], [], [], [], 0
         stats = {"msgs": 0, "duplicate_end_stamps": 0, "first_point_before_header": 0,
                  "non_monotonic_points_max": 0, "last_point_not_latest": 0, "frame_ids": set()}
+        crop = self._lidar_crop()
+        n_returns, n_cropped = 0, 0
         with self._reader() as r:
             conns = [c for c in r.connections if c.topic == self.options["lidar_topic"]]
             if not conns:
@@ -480,6 +531,13 @@ class LunaPolarisAdapter(DatasetAdapter):
                     continue
                 seen.add(end)
                 pts["offset_ns"] = (t - start).astype(np.uint32)
+                if crop is not None:
+                    keep = crop_lidar_points(pts, *crop)
+                    n_returns += int(np.count_nonzero(np.c_[pts["x"], pts["y"], pts["z"]].any(axis=1)))
+                    n_cropped += int((~keep).sum())
+                    pts = pts[keep]
+                if self.options["lidar_keep_every_n"] is not None:
+                    pts = pts[::int(self.options["lidar_keep_every_n"])]
                 rel = f"lidar/{end}.bin"
                 write_lidar_scan(out_dir / rel, start, pts)
                 rows.append((end, rel, ""))
@@ -531,7 +589,14 @@ class LunaPolarisAdapter(DatasetAdapter):
             "frame_dt_s": {"median": float(np.nanmedian(frame_dt)), "max": float(np.nanmax(frame_dt))},
             "preprocessing": ["intensity (float, integer-valued) stored as uint8 reflectivity",
                               *(["Livox IMU acceleration converted from g to m/s^2 (x 9.80665)"]
-                                if mode.is_inertial and self.options["lidar_imu_source"] == "livox" else [])],
+                                if mode.is_inertial and self.options["lidar_imu_source"] == "livox" else []),
+                              *([f"ground-only crop in {self.options['lidar_crop_frame']} (/tf_static): returns "
+                                 f"with height > {crop[1]} m or horizontal range > {crop[2]} m dropped "
+                                 f"({n_cropped / max(1, n_returns):.1%} of returns); zero points kept; "
+                                 "frames.csv end stamps and per-point offsets are those of the full scan"]
+                                if crop is not None else []),
+                              *([f"every {int(self.options['lidar_keep_every_n'])}th point kept (message order)"]
+                                if self.options["lidar_keep_every_n"] is not None else [])],
             **imu_stats,
         }
         return PreparedInput(out_dir, mode, n, n_imu, manifest)

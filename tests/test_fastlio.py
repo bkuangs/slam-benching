@@ -13,8 +13,8 @@ from scipy.spatial.transform import Rotation
 from slambench.algorithms import ALGORITHMS
 from slambench.algorithms.base import RunContext
 from slambench.algorithms.fastlio import POSE_COLUMNS, FastLioAdapter, driver_source_sha1
-from slambench.datasets.lunapolaris import (LIDAR_POINT_DTYPE, livox_points, read_lidar_scan,
-                                            write_lidar_scan)
+from slambench.datasets.lunapolaris import (LIDAR_POINT_DTYPE, LunaPolarisAdapter, crop_lidar_points,
+                                            livox_points, read_lidar_scan, write_lidar_scan)
 from slambench.trajectory import make_T, read_tum
 from slambench.types import RunStatus, SensorMode
 
@@ -170,3 +170,31 @@ def test_livox_points_decodes_pointcloud2():
     msg.data = a.tobytes()
     with pytest.raises(ValueError):
         livox_points(msg)
+
+
+def test_ground_crop_in_crop_frame_keeps_zero_points():
+    pts = np.zeros(5, LIDAR_POINT_DTYPE)
+    # LiDAR frame; the crop frame sits 0.3 m below the LiDAR, so z_crop = z_lidar + 0.3
+    pts["x"] = [1.0, 1.0, 4.0, 0.0, 2.0]
+    pts["z"] = [-0.2, 0.5, -0.2, 0.0, 0.1]
+    T = make_T(np.eye(3), [0.0, 0.0, 0.3])
+    assert crop_lidar_points(pts, T, 0.5, 3.0).tolist() == [True, False, False, True, True]
+    assert crop_lidar_points(pts, T, None, 3.0).tolist() == [True, True, False, True, True]
+    assert crop_lidar_points(pts, T, 0.5, None).tolist() == [True, False, True, True, True]
+
+
+def test_ground_crop_options_only_enter_cropped_lidar_cache_keys(tmp_path):
+    plain = LunaPolarisAdapter(tmp_path, "sequence_01").preparation_inputs(SensorMode.LIDAR_INERTIAL)
+    assert not any(k.startswith("lidar_crop") for k in plain["options"])
+    cropped = LunaPolarisAdapter(tmp_path, "sequence_01", {"lidar_crop_max_height_m": 0.5,
+                                                           "lidar_crop_max_range_m": 3.0})
+    opts = cropped.preparation_inputs(SensorMode.LIDAR_INERTIAL)["options"]
+    assert opts["lidar_crop_max_range_m"] == 3.0 and opts["lidar_crop_frame"] == "leo01/base_footprint"
+    assert not any(k.startswith("lidar_crop") for k in cropped.preparation_inputs(SensorMode.STEREO)["options"])
+    with pytest.raises(ValueError):
+        LunaPolarisAdapter(tmp_path, "sequence_01", {"lidar_crop_max_range_m": 0})
+    assert "lidar_keep_every_n" not in plain["options"]
+    decim = LunaPolarisAdapter(tmp_path, "sequence_01", {"lidar_keep_every_n": 5})
+    assert decim.preparation_inputs(SensorMode.LIDAR_INERTIAL)["options"]["lidar_keep_every_n"] == 5
+    with pytest.raises(ValueError):
+        LunaPolarisAdapter(tmp_path, "sequence_01", {"lidar_keep_every_n": 0})
