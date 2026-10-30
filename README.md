@@ -55,6 +55,10 @@ tests/                                evaluator / runner tests with synthetic gr
 ## Setup (PACE ICE; adapt paths elsewhere)
 Raw data, converted inputs, containers and run outputs stay outside the repository, by default in
 `~/scratch/slam-bench-work` (`work_dir`, `output_root` in configs).
+Converted inputs (`prepared_dir`, default `auto`): an existing complete cache in `<work_dir>/prepared` is
+reused; otherwise a Slurm job converts into the compute node's local disk (`$TMPDIR`, ~1.4 TB on ICE),
+deleted when the job ends, so new variants cost no scratch quota. Set `prepared_dir: work_dir` (or use
+`slambench prepare`) for a persistent cache, e.g. inputs read by analysis scripts or many repeats.
 
 ```bash
 # 1. Python environment (Python >= 3.9)
@@ -155,7 +159,8 @@ localizes another sequence or lighting in that atlas. Submit it with
 ```yaml
 name: lunapolaris_seq01_orbslam3_stereo
 output_root: ~/scratch/slam-bench-work/runs
-work_dir: ~/scratch/slam-bench-work            # prepared-input cache
+work_dir: ~/scratch/slam-bench-work            # persistent prepared-input cache (<work_dir>/prepared)
+prepared_dir: auto                             # auto | work_dir | node_local | <path>
 dataset:   {name: lunapolaris, root: ~/scratch/LunaPolaris, sequence: sequence_01, options: {}}
 algorithm:
   name: orbslam3
@@ -175,7 +180,8 @@ explicit setting recorded in every summary row; keep it constant within a compar
 
 ### What a run directory contains
 `config.resolved.yaml`, `environment.json` (git commit + diff, packages, host, Slurm job,
-container sha256 and library versions), `dataset_info.json`, `prepared_input.json`,
+container sha256 and library versions), `dataset_info.json`, `prepared_input.json` (cache
+`directory` and `location`), `input_frames.csv` (copy of the input frame list),
 `command.txt`, `stdout.log`, `stderr.log`, `status.json` (status, stage, estimator outcome,
 return code, wall time, peak RSS, CPU time; written from the start), `error.json` (harness
 failures), `algorithm/` (native config + raw outputs), `trajectory.tum` (final),

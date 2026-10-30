@@ -19,4 +19,7 @@ source "$VENV/bin/activate"
 if [ -n "${SLAMBENCH_APPTAINER_DIR:-}" ]; then export PATH="$SLAMBENCH_APPTAINER_DIR:$PATH"; fi
 command -v apptainer >/dev/null || { echo "apptainer not on PATH" >&2; exit 2; }
 echo "host=$(hostname) job=${SLURM_JOB_ID:-none} cpus=${SLURM_CPUS_PER_TASK:-?}"
-exec python -m slambench "$@"
+# Node-local prepared inputs (prepared_dir auto/node_local) are removed by slambench at exit; this also
+# covers SIGTERM (e.g. time limit).
+trap 'rm -rf "${SLURM_TMPDIR:-${TMPDIR:-/tmp}}/slambench-prepared-$(id -un)-${SLURM_JOB_ID:-none}"' EXIT
+python -m slambench "$@"

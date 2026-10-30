@@ -18,8 +18,9 @@ from .plots import plot_all
 
 
 def _input_timestamps(run_dir: Path) -> np.ndarray:
+    from ..prepared_store import input_frames_csv
     prep = json.loads((run_dir / "prepared_input.json").read_text())
-    frames_csv = Path(prep["directory"]) / "frames.csv"
+    frames_csv = input_frames_csv(run_dir, prep["directory"])
     return np.loadtxt(frames_csv, delimiter=",", skiprows=1, usecols=0, dtype=np.int64, ndmin=1)
 
 

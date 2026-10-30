@@ -171,7 +171,7 @@ def main(argv=None) -> int:
     p = add("inspect", _cmd_inspect, "show dataset streams/calibration and per-mode compatibility")
     p.add_argument("config")
     p.add_argument("--set", action="append")
-    p = add("prepare", _cmd_prepare, "only convert/prepare estimator input for a config")
+    p = add("prepare", _cmd_prepare, "only convert/prepare estimator input for a config (always into <work_dir>/prepared)")
     p.add_argument("config")
     p.add_argument("--set", action="append")
     args = ap.parse_args(argv)

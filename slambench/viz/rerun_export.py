@@ -52,7 +52,8 @@ def _load_run(run_dir: Path) -> Dict[str, Any]:
                                 f"(status {run['status'].get('status')}); nothing to replay")
     run["prep_dir"] = Path(json.loads(prep_json.read_text())["directory"])
     rows = []
-    with open(run["prep_dir"] / "frames.csv") as f:
+    from ..prepared_store import input_frames_csv
+    with open(input_frames_csv(run_dir, str(run["prep_dir"]))) as f:
         next(f)
         for line in f:
             t, left, right = (line.rstrip("\n").split(",") + ["", ""])[:3]

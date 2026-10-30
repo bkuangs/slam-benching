@@ -134,16 +134,24 @@ class DatasetAdapter(ABC):
         payload = inputs if inputs is not None else self.preparation_inputs(mode)
         return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
+    def cached_preparation(self, mode: SensorMode, cache_root: Path) -> Optional[PreparedInput]:
+        """The complete cached preparation under cache_root, or None (never prepares)."""
+        key = self.preparation_key(mode, self.preparation_inputs(mode))
+        out = Path(cache_root) / self.name / self.sequence / f"{mode.value}_{key}"
+        if not self._complete_preparation(out, key):
+            return None
+        manifest = json.loads((out / "manifest.json").read_text())
+        return PreparedInput(out, mode, manifest["n_frames"], manifest.get("n_imu", 0), manifest)
+
     def prepare_cached(self, mode: SensorMode, cache_root: Path) -> PreparedInput:
         """prepare_offline() with a cache keyed by preparation_key()."""
+        hit = self.cached_preparation(mode, cache_root)
+        if hit is not None:
+            return hit
         inputs = self.preparation_inputs(mode)
         key = self.preparation_key(mode, inputs)
         out = Path(cache_root) / self.name / self.sequence / f"{mode.value}_{key}"
         manifest_path = out / "manifest.json"
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text())
-            if manifest.get("complete") and manifest.get("preparation_key") == key:
-                return PreparedInput(out, mode, manifest["n_frames"], manifest.get("n_imu", 0), manifest)
         import os
         import shutil
         import uuid

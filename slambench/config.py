@@ -12,6 +12,7 @@ DEFAULTS: Dict[str, Any] = {
     "name": None,
     "output_root": "~/scratch/slam-bench-work/runs",
     "work_dir": "~/scratch/slam-bench-work",
+    "prepared_dir": "auto",   # see slambench/prepared_store.py
     "dataset": {"name": None, "root": None, "sequence": None, "options": {}},
     "algorithm": {"name": None, "mode": None, "options": {}, "settings": {}},
     "execution": {"timeout_s": 7200, "memory_poll_s": 0.5},

@@ -23,6 +23,7 @@ from .algorithms import ALGORITHMS
 from .algorithms.base import RunContext
 from .config import expand
 from .datasets import DATASETS
+from .prepared_store import keep_input_frames, prepare_input
 from .types import RunStatus, SensorMode
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -336,9 +337,11 @@ def _run_stages(cfg, evaluate, log, run_dir, status, stage, finish) -> Path:
         stage("prepare_input")
         log(f"[slambench] preparing {mode.value} input for {dataset.name}/{dataset.sequence} ...")
         t0 = time.monotonic()
-        prepared = dataset.prepare_cached(mode, expand(cfg["work_dir"]) / "prepared")
+        prepared, location = prepare_input(dataset, mode, cfg)
+        keep_input_frames(prepared, run_dir)
         _write_json(run_dir / "prepared_input.json",
-                    {"directory": str(prepared.directory), "n_frames": prepared.n_frames,
+                    {"directory": str(prepared.directory), "location": location,
+                     "n_frames": prepared.n_frames,
                      "n_imu": prepared.n_imu, "manifest": prepared.manifest,
                      "prepare_or_cache_time_s": time.monotonic() - t0})
     except Exception as exc:  # noqa: BLE001
