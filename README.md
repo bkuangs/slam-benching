@@ -188,6 +188,8 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
 (`online_*` / `final_*` summary columns; see `docs/evaluation.md`).
 
 ## Documentation
+* `docs/research_summary.md` — **start here**: research question, current findings and evidence,
+  open work, data quirks, where outputs live. `AGENTS.md` has PACE operational notes.
 * `docs/adapter_interface.md` — dataset/algorithm adapter contracts, offline input format,
   normalized outputs, how to add a dataset or estimator.
 * `docs/evaluation.md` — association, frames, alignment, ATE/RPE, coverage, timing.
