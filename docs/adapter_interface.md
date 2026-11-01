@@ -230,6 +230,31 @@ Constructor: `(options: dict)` from `algorithm.options` (installation paths, con
   * `orbslam3_4452a3c_driver3.sif` and `spslam3_9439971_r3.sif` contain patch 0006;
   * the older images `orbslam3_4452a3c.sif` and `spslam3_9439971.sif` are still accepted for
     configs without map reuse (`legacy_driver_source` in `version_info`).
+
+  **Learned relocalization** (SP_SLAM3 only, patch 0007, image `spslam3_9439971_r5.sif`; results in
+  `docs/results/map_reuse.md`, "Learned relocalization (MixVPR + LightGlue) inside SP_SLAM3").
+  All settings are off by default, and old configs are unchanged.
+  * `global_descriptors: true` (session A, with `save_map`) computes a MixVPR descriptor
+    (`/opt/SP_SLAM3/mixvpr.pt`, 4096-d, L2-normalized) per keyframe and stores it in the atlas.
+  * `learned_reloc: true` (session B, `reuse_mode: relocalize` only) needs a map saved with
+    `global_descriptors: true`. It replaces the DBoW candidates of `Tracking::Relocalization` with
+    the top `learned_reloc_topk` (5) keyframes by MixVPR cosine. Each candidate is verified with
+    `learned_reloc_verifier`:
+    * `lightglue` (default): LightGlue matches to the keyframe's map points, then MLPnP RANSAC,
+      pose optimization and `SearchByProjection`;
+    * `bow`: SP_SLAM3's stock `SearchByBoW`, as an ablation.
+
+    A candidate is accepted with ≥ `learned_reloc_min_inliers` (50) inliers. The pose is used,
+    and tracking resumes, only once `learned_reloc_consistent_frames` (3) consecutive frames are
+    accepted, each within 0.3 m / 5° of the previous frame's accepted pose. Until then the
+    frame stays lost.
+  * `learned_reloc_recover_descriptors: true` (default) gives LightGlue unit-norm descriptors.
+    Upstream `SPDetector::computeDescriptors` normalizes each descriptor channel over the
+    keypoints, not each descriptor, and the recovery undoes this.
+  * The driver writes one `algorithm/learned_reloc.csv` row per attempt.
+    `scripts/learned_reloc_diagnostics.py` scores these rows against GT.
+  * Image `spslam3_9439971_r4.sif` (patch 0007 without the recovery) is accepted only with
+    `learned_reloc_recover_descriptors: false` or the `bow` verifier.
 * `AlgorithmOutput.diagnostics_available` states which diagnostics exist.
 
 ## Run directory

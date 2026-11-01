@@ -20,7 +20,18 @@ export APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-$HOME/scratch/slam-bench-work/tmp}"
 export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$HOME/scratch/slam-bench-work/cache}"
 mkdir -p "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR"
 export SLAMBENCH_BUILD_JOBS="${SLURM_CPUS_PER_TASK:-8}"
+# MixVPR TorchScript model baked into the image (learned relocalization, patch 0007); export it
+# first with export_mixvpr_slambench.py (see its docstring). Staged next to the definition for
+# %files and removed afterwards.
+MIXVPR_MODEL="${SLAMBENCH_MIXVPR_MODEL:-$HOME/scratch/slam-bench-work/vpr_weights/mixvpr_slambench.pt}"
+if [ ! -f "$MIXVPR_MODEL" ]; then
+  echo "MixVPR TorchScript model not found: $MIXVPR_MODEL (set SLAMBENCH_MIXVPR_MODEL;" \
+       "export it with third_party/spslam3/export_mixvpr_slambench.py)" >&2
+  exit 1
+fi
 cd "$HERE"
+cp "$MIXVPR_MODEL" mixvpr_slambench.pt
+trap 'rm -f "$HERE/mixvpr_slambench.pt"' EXIT
 apptainer build --fakeroot --force "$OUT" spslam3.def
 apptainer test "$OUT"
 echo "Built $OUT"

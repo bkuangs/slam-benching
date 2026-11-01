@@ -23,6 +23,23 @@ Differences from the ORB-SLAM3 adapter:
 
 Map reuse (``save_map`` / ``load_map`` / ``reuse_mode``, see orbslam3_map_reuse) works as for
 ORB-SLAM3; patch 0006 re-enables the fork's disabled atlas save/load (and fixes its serialization).
+
+Learned relocalization (patch 0007; all off by default, and with the defaults the settings file is
+unchanged):
+
+* ``global_descriptors: true``  compute a MixVPR global descriptor (4096-d, /opt/SP_SLAM3/mixvpr.pt,
+  exported by export_mixvpr_slambench.py) for every keyframe and store it in the atlas (session A);
+* ``learned_reloc: true``  session B (``load_map``, ``reuse_mode: relocalize``, a map saved with
+  ``global_descriptors: true``): relocalization candidates are the ``learned_reloc_topk`` keyframes
+  most similar to the frame's MixVPR descriptor, verified by LightGlue matches to their map points
+  (``learned_reloc_verifier: lightglue``; ``bow``: SP_SLAM3's SearchByBoW, an ablation) + MLPnP RANSAC
+  + pose optimization, accepted with >= ``learned_reloc_min_inliers`` inliers, and only declared once
+  ``learned_reloc_consistent_frames`` consecutive frames were accepted at mutually consistent poses.
+  Every attempt is logged to ``algorithm/learned_reloc.csv``. ``learned_reloc_recover_descriptors``
+  (default true) hands LightGlue unit-norm descriptors: upstream SPDetector::computeDescriptors
+  normalizes each descriptor channel over the image's keypoints instead of each descriptor, which
+  leaves an image-dependent per-channel scale that LightGlue cannot match across lighting. The
+  spslam3_9439971_r4.sif image always behaves as ``false``.
 """
 
 from __future__ import annotations
@@ -51,6 +68,8 @@ SPSLAM3_COMMIT = "9439971f73f571a06d55bee0c1f0bd2541a381cb"
 DEFAULT_CONTAINER = "~/scratch/slam-bench-work/containers/spslam3_9439971.sif"
 VOCABULARY = "/opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3"
 LIGHTGLUE_MODEL = "/opt/SP_SLAM3/lightglue.pt"
+MIXVPR_MODEL = "/opt/SP_SLAM3/mixvpr.pt"
+LEARNED_RELOC_LOG = "learned_reloc.csv"
 DRIVER_SOURCE_DIR = Path(__file__).resolve().parents[2] / "third_party" / "spslam3"
 DRIVER_SOURCES = (DRIVER_SOURCE_DIR / "slambench_spslam3_driver.cc",
                   DRIVER_SOURCE_DIR.parent / "orbslam3" / "slambench_preprocess.h")
@@ -59,7 +78,15 @@ SETTINGS_FILE = "spslam3_settings.yaml"
 # without map reuse (the driver and patch 0006 only add behaviour behind the map-reuse settings).
 LEGACY_DRIVER_SOURCE_SHA1 = {
     "463cc0adb1f40a28ef3c26bb22d320dea6089a30": "spslam3_9439971.sif: before map reuse (patch 0006)",
+    "3fc07c4b60ad6e1c5564bfa178fd55fe19e831c6": "spslam3_9439971_r3.sif: before learned relocalization (patch 0007)",
+    "af171357f101d83cf7599de2665aa54b6ed77050": "spslam3_9439971_r4.sif: patch 0007 without the unit-norm "
+                                                "descriptor recovery of the LightGlue verifier",
 }
+# Legacy images that already have map reuse (patch 0006); they only lack the learned-relocalization settings.
+MAP_REUSE_LEGACY_DRIVER_SOURCE_SHA1 = {"3fc07c4b60ad6e1c5564bfa178fd55fe19e831c6",
+                                       "af171357f101d83cf7599de2665aa54b6ed77050"}
+# Legacy images with learned relocalization that always behave as learned_reloc_recover_descriptors: false.
+LEARNED_RELOC_NO_RECOVERY_DRIVER_SOURCE_SHA1 = {"af171357f101d83cf7599de2665aa54b6ed77050"}
 
 
 def driver_source_sha1() -> Optional[str]:
@@ -96,6 +123,90 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 }
 
 
+# Learned relocalization (patch 0007); added to the resolved settings only when used.
+LEARNED_RELOC_DEFAULTS: Dict[str, Any] = {
+    "global_descriptors": False,          # MixVPR descriptor per keyframe, stored in the atlas
+    "learned_reloc": False,               # MixVPR top-K + verification relocalization (session B)
+    "learned_reloc_topk": 5,
+    "learned_reloc_min_inliers": 50,
+    "learned_reloc_consistent_frames": 3,
+    "learned_reloc_verifier": "lightglue",  # lightglue | bow (ablation: SP_SLAM3's SearchByBoW)
+    # LightGlue sees unit-norm descriptors recovered from SP_SLAM3's per-channel-normalized ones
+    # (upstream SPDetector::computeDescriptors normalizes over keypoints, not over channels)
+    "learned_reloc_recover_descriptors": True,
+}
+LEARNED_RELOC_VERIFIERS = ("lightglue", "bow")
+
+
+def resolve_learned_reloc_settings(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the learned-relocalization settings of a resolved settings dict (in place)."""
+    for k in ("global_descriptors", "learned_reloc", "learned_reloc_recover_descriptors"):
+        if not isinstance(out[k], bool):
+            raise ValueError(f"{k} must be true or false, got {out[k]!r}")
+    for k in ("learned_reloc_topk", "learned_reloc_min_inliers", "learned_reloc_consistent_frames"):
+        if isinstance(out[k], bool) or not isinstance(out[k], int) or out[k] < 1:
+            raise ValueError(f"{k} must be an integer >= 1, got {out[k]!r}")
+    if out["learned_reloc_min_inliers"] < 10:
+        raise ValueError("learned_reloc_min_inliers must be >= 10 (pose optimization needs 10 inliers)")
+    if out["learned_reloc_verifier"] not in LEARNED_RELOC_VERIFIERS:
+        raise ValueError(f"learned_reloc_verifier must be one of {LEARNED_RELOC_VERIFIERS}, "
+                         f"got {out['learned_reloc_verifier']!r}")
+    if out["learned_reloc"]:
+        if out.get("load_map") is None or out.get("reuse_mode") != "relocalize":
+            raise ValueError("learned_reloc needs load_map with reuse_mode: relocalize")
+        if out["learned_reloc_verifier"] == "lightglue" and not out["lightglue"]:
+            raise ValueError("learned_reloc_verifier: lightglue needs lightglue: true")
+    return out
+
+
+def learned_reloc_yaml_lines(s: Dict[str, Any], algo_dir: Path) -> List[str]:
+    """GlobalDescriptor.* / LearnedReloc.* keys of the settings file; empty when unused."""
+    lines = []
+    if s.get("global_descriptors") or s.get("learned_reloc"):
+        lines.append(f'GlobalDescriptor.model_path: "{MIXVPR_MODEL}"')
+    if s.get("learned_reloc"):
+        lines += ["LearnedReloc.enable: 1",
+                  f"LearnedReloc.topK: {int(s['learned_reloc_topk'])}",
+                  f"LearnedReloc.minInliers: {int(s['learned_reloc_min_inliers'])}",
+                  f"LearnedReloc.consistentFrames: {int(s['learned_reloc_consistent_frames'])}",
+                  f'LearnedReloc.verifier: "{s["learned_reloc_verifier"]}"',
+                  f"LearnedReloc.recoverDescriptors: {int(bool(s['learned_reloc_recover_descriptors']))}",
+                  f'LearnedReloc.logFile: "{(Path(algo_dir).resolve() / LEARNED_RELOC_LOG)}"']
+    return lines
+
+
+def summarize_learned_reloc(path: Path) -> Dict[str, Any]:
+    """Summary of the driver's per-attempt learned-relocalization log (learned_reloc.csv)."""
+    import csv
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    out: Dict[str, Any] = {"n_attempts": len(rows)}
+    if not rows:
+        return out
+
+    def col(k):
+        return np.array([float(r[k]) for r in rows if r.get(k) not in (None, "")])
+
+    acc = [r for r in rows if r["accepted"] == "1"]
+    conf = [r for r in rows if r["confirmed"] == "1"]
+    out.update({
+        "n_attempts_lost": sum(r["mode"] == "lost" for r in rows),
+        "n_accepted_single_frame": len(acc), "n_confirmed": len(conf),
+        "first_confirmed_timestamp_s": float(conf[0]["timestamp"]) if conf else None,
+        "n_database_keyframes": int(rows[0]["n_db"]),
+        "n_with_verified_candidate": sum(int(r["best_rank"]) >= 0 for r in rows),
+    })
+    for k in ("desc_ms", "retrieval_ms", "verify_ms", "total_ms"):
+        v = col(k)
+        out[k] = {"median": float(np.median(v)), "p95": float(np.percentile(v, 95)), "max": float(v.max())}
+    best = [int(r["best_inliers"]) for r in rows]
+    out["best_inliers"] = {"median": float(np.median(best)), "max": int(max(best))}
+    sims = [float(r["cand_sims"].split(";")[0]) for r in rows if r["cand_sims"]]
+    if sims:
+        out["top1_similarity"] = {"median": float(np.median(sims)), "max": float(max(sims))}
+    return out
+
+
 class SpSlam3Adapter(OrbSlam3Adapter):
     name = "spslam3"
     estimator_label = "SP_SLAM3"
@@ -107,16 +218,22 @@ class SpSlam3Adapter(OrbSlam3Adapter):
         return Path(p).expanduser()
 
     def resolve_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        unknown = set(settings) - set(DEFAULT_SETTINGS) - set(mr.MAP_REUSE_DEFAULTS)
+        unknown = (set(settings) - set(DEFAULT_SETTINGS) - set(mr.MAP_REUSE_DEFAULTS)
+                   - set(LEARNED_RELOC_DEFAULTS))
         if unknown:
             raise ValueError(f"unknown spslam3 settings: {sorted(unknown)}")
         out = dict(DEFAULT_SETTINGS)
-        # Map-reuse keys are only added to the resolved settings when used (keeps old configs identical).
+        # Map-reuse / learned-relocalization keys are only added to the resolved settings when used
+        # (keeps old configs identical).
         if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
             out.update(mr.MAP_REUSE_DEFAULTS)
+        if set(settings) & set(LEARNED_RELOC_DEFAULTS):
+            out.update(LEARNED_RELOC_DEFAULTS)
         out.update(settings)
         if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
             mr.resolve_map_reuse_settings(out)
+        if set(settings) & set(LEARNED_RELOC_DEFAULTS):
+            resolve_learned_reloc_settings(out)
         if out["loop_closure"] is not True:
             raise ValueError("SP_SLAM3 cannot disable loop closing; loop_closure must be true")
         for k in ("sp_n_features", "sp_n_levels", "clahe_tile_grid"):
@@ -152,6 +269,41 @@ class SpSlam3Adapter(OrbSlam3Adapter):
             problems.append("SP_SLAM3 adapter supports rectified pinhole stereo only "
                             f"(got {calib.left.model}, rectified={calib.left.rectified})")
         problems += self._map_reuse_validate(mode, settings)
+        problems += self._learned_reloc_validate(settings)
+        return problems
+
+    def _map_reuse_validate(self, mode, settings) -> List[str]:
+        legacy = getattr(self, "_legacy_driver", None)
+        if legacy and getattr(self, "_legacy_driver_sha1", None) in MAP_REUSE_LEGACY_DRIVER_SOURCE_SHA1:
+            self._legacy_driver = None  # this legacy image has map reuse
+            try:
+                return super()._map_reuse_validate(mode, settings)
+            finally:
+                self._legacy_driver = legacy
+        return super()._map_reuse_validate(mode, settings)
+
+    def _learned_reloc_validate(self, settings) -> List[str]:
+        if not (settings.get("global_descriptors") or settings.get("learned_reloc")):
+            return []
+        problems = []
+        legacy_sha1 = getattr(self, "_legacy_driver_sha1", None)
+        if legacy_sha1 in LEARNED_RELOC_NO_RECOVERY_DRIVER_SOURCE_SHA1:
+            if (settings.get("learned_reloc") and settings.get("learned_reloc_verifier") == "lightglue"
+                    and settings.get("learned_reloc_recover_descriptors")):
+                problems.append("learned_reloc_recover_descriptors: true needs an image with the current "
+                                f"patch 0007; {self.container} is {self._legacy_driver} "
+                                "(set it to false to reproduce that image's runs)")
+        elif getattr(self, "_legacy_driver", None):
+            problems.append("global_descriptors / learned_reloc need an image built with patch 0007; "
+                            f"{self.container} is {self._legacy_driver}")
+        if settings.get("learned_reloc") and mr.loading(settings):
+            run = mr.mapping_run_dir(mr.atlas_to_load(settings))
+            if run is not None:
+                import yaml
+                cfg = yaml.safe_load((run / "config.resolved.yaml").read_text())
+                if not (cfg["algorithm"].get("settings") or {}).get("global_descriptors"):
+                    problems.append(f"learned_reloc: the map run {run} was not made with "
+                                    "global_descriptors: true (its keyframes have no MixVPR descriptor)")
         return problems
 
     def estimate_frame(self, mode: SensorMode) -> str:
@@ -181,9 +333,10 @@ class SpSlam3Adapter(OrbSlam3Adapter):
             raise RuntimeError(f"container SP_SLAM3 commit {commit} != pinned {SPSLAM3_COMMIT}")
         info["expected_driver_source_sha1"] = expected = driver_source_sha1()
         found = info.get("container_versions", {}).get("driver_source_sha1")
-        self._legacy_driver = None
+        self._legacy_driver = self._legacy_driver_sha1 = None
         if commit and expected and found != expected and found in LEGACY_DRIVER_SOURCE_SHA1:
             self._legacy_driver = info["legacy_driver_source"] = LEGACY_DRIVER_SOURCE_SHA1[found]
+            self._legacy_driver_sha1 = found
         elif commit and expected and found != expected:
             raise RuntimeError(f"container driver source {found or '(not recorded)'} differs from this "
                                f"repository's driver {expected}; rebuild the image with "
@@ -227,12 +380,24 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                   "Viewer.ViewpointX: 0.0", "Viewer.ViewpointY: -0.7", "Viewer.ViewpointZ: -1.8",
                   "Viewer.ViewpointF: 500.0"]
         lines += mr.settings_yaml_lines(s, ctx.algo_dir)
+        lines += learned_reloc_yaml_lines(s, ctx.algo_dir)
         return "\n".join(lines) + "\n"
 
     def prepare(self, ctx: RunContext) -> None:
         ctx.algo_dir.mkdir(parents=True, exist_ok=True)
         (ctx.algo_dir / SETTINGS_FILE).write_text(self._settings_yaml(ctx))
         mr.prepare(ctx.settings, ctx.algo_dir)
+
+    def collect(self, ctx: RunContext, returncode, timed_out):
+        out = super().collect(ctx, returncode, timed_out)
+        log = ctx.algo_dir / LEARNED_RELOC_LOG
+        if ctx.settings.get("learned_reloc") and log.exists():
+            out.artifacts["learned_reloc"] = log
+            try:
+                out.extra["learned_reloc"] = summarize_learned_reloc(log)
+            except Exception as exc:  # noqa: BLE001 - diagnostics only; never fail collection
+                out.extra["learned_reloc"] = {"error": f"{type(exc).__name__}: {exc}"}
+        return out
 
     def command(self, ctx: RunContext) -> List[str]:
         s = ctx.settings

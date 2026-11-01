@@ -1,0 +1,665 @@
+diff --git a/include/KeyFrame.h b/include/KeyFrame.h
+index 537f3a1..7a76c51 100644
+--- a/include/KeyFrame.h
++++ b/include/KeyFrame.h
+@@ -36,6 +36,7 @@
+ #include <boost/serialization/base_object.hpp>
+ #include <boost/serialization/vector.hpp>
+ #include <boost/serialization/map.hpp>
++#include <boost/serialization/version.hpp>
+ 
+ // slam-benching patch: boost serialization of the DBoW3 BoW vectors (std::map subclasses).
+ namespace DBoW3 {
+@@ -289,6 +290,21 @@ class KeyFrame
+         serializeMatrix(ar, Vw, version);
+         serializeMatrix(ar, Owb, version);
+ 
++        // slam-benching patch (learned relocalization): the global place-recognition descriptor
++        // (KeyFrame class version 1, see BOOST_CLASS_VERSION below; atlases saved before have none).
++        if (version >= 1)
++        {
++            std::vector<float> vGlobalDesc;
++            if (Archive::is_saving::value && mGlobalDescriptor.defined() && mGlobalDescriptor.numel() > 0)
++            {
++                torch::Tensor t = mGlobalDescriptor.to(torch::kCPU).to(torch::kFloat32).contiguous();
++                vGlobalDesc.assign(t.data_ptr<float>(), t.data_ptr<float>() + t.numel());
++            }
++            ar & vGlobalDesc;
++            if (Archive::is_loading::value && !vGlobalDesc.empty())
++                mGlobalDescriptor = torch::from_blob(vGlobalDesc.data(), {(int64_t)vGlobalDesc.size()},
++                                                     torch::kFloat32).clone();
++        }
+     }
+ 
+ public:
+@@ -636,4 +652,7 @@ public:
+ 
+ } //namespace ORB_SLAM
+ 
++// slam-benching patch (learned relocalization): version 1 adds the global descriptor.
++BOOST_CLASS_VERSION(ORB_SLAM3::KeyFrame, 1)
++
+ #endif // KEYFRAME_H
+diff --git a/include/PlaceRecognition.h b/include/PlaceRecognition.h
+index 8036831..3da2a8f 100644
+--- a/include/PlaceRecognition.h
++++ b/include/PlaceRecognition.h
+@@ -39,6 +39,15 @@ public:
+ 
+     bool isLoaded() const { return mbLoaded; }
+ 
++    // slam-benching patch (learned relocalization): descriptor of a TorchScript model that contains
++    // its own preprocessing (third_party/spslam3/export_mixvpr_slambench.py: uint8 RGB [1,H,W,3] ->
++    // L2-normalised [1,D]). image: the tracking input (gray, BGR(A) or RGB(A) if rgb). Returns a
++    // contiguous float32 CPU tensor [D] (empty if no model is loaded).
++    torch::Tensor extractDescriptorRaw(const cv::Mat &image, bool rgb);
++    // Runs the model once on a dummy image (CUDA initialisation / kernel selection), so the first
++    // timed call is representative.
++    void warmUp(int width, int height);
++
+ private:
+     torch::jit::script::Module mModel;
+     torch::Device mDevice;
+diff --git a/include/Tracking.h b/include/Tracking.h
+index cb6a3d0..bbfb900 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -41,6 +41,7 @@
+ 
+ #include "GeometricCamera.h"
+ 
++#include <map>
+ #include <mutex>
+ #include <unordered_set>
+ 
+@@ -110,6 +111,34 @@ public:
+     // Place Recognition (NetVLAD/CosPlace)
+     std::shared_ptr<PlaceRecognition> mpPlaceRecognition;
+ 
++    // slam-benching patch (learned relocalization). mpGlobalDescExtractor (settings
++    // GlobalDescriptor.model_path, a MixVPR TorchScript model with its own preprocessing) computes
++    // KeyFrame::mGlobalDescriptor for every new keyframe (stored in the atlas) and, with
++    // mbLearnedReloc, the query descriptor of LearnedRelocalization(), which replaces the DBoW3
++    // candidates of Relocalization(): top-K keyframes of the current map by cosine similarity,
++    // verified by LightGlue (or, as an ablation, SearchByBoW) matches to the candidate's map points,
++    // MLPnP RANSAC, pose optimization and the projection refinement, accepted with at least
++    // mnLearnedRelocMinInliers inliers. A relocalization is only declared once
++    // mnLearnedRelocConsistentFrames consecutive frames were accepted with mutually consistent poses
++    // (each within mfLearnedRelocMaxDist m / mfLearnedRelocMaxAngleDeg deg of the previous frame's).
++    // Every attempt is logged to mLearnedRelocLog (LearnedReloc.logFile).
++    std::shared_ptr<PlaceRecognition> mpGlobalDescExtractor;
++    bool mbLearnedReloc = false;
++    int mnLearnedRelocTopK = 5;
++    int mnLearnedRelocMinInliers = 50;
++    int mnLearnedRelocConsistentFrames = 3;
++    bool mbLearnedRelocVerifierBoW = false;
++    float mfLearnedRelocMaxDist = 0.3f;
++    float mfLearnedRelocMaxAngleDeg = 5.0f;
++    float mfLearnedRelocRansacEpsilon = 0.2f;  // expected inlier ratio of the MLPnP RANSAC
++    int mnLearnedRelocRansacMaxIter = 1000;
++    // LightGlue verification on unit-norm descriptors recovered from SP_SLAM3's per-channel-normalized
++    // ones (see SlambenchUnitNormDescriptors in Tracking.cc); keyframe results are cached.
++    bool mbLearnedRelocRecoverDesc = true;
++    std::map<KeyFrame*, cv::Mat> mLearnedRelocKFDesc;
++    std::ofstream mLearnedRelocLog;
++    void ComputeKeyFrameGlobalDescriptor(KeyFrame* pKF);
++
+     // Tracking states
+     enum eTrackingState{
+         SYSTEM_NOT_READY=-1,
+@@ -205,6 +234,7 @@ protected:
+     bool PredictStateIMU();
+ 
+     bool Relocalization();
++    bool LearnedRelocalization();  // slam-benching patch
+ 
+     void UpdateLocalMap();
+     void UpdateLocalPoints();
+@@ -280,6 +310,19 @@ protected:
+     MapDrawer* mpMapDrawer;
+     bool bStepByStep = false;  // slam-benching patch: was uninitialized
+ 
++    // slam-benching patch (learned relocalization): input left image of the current frame (before
++    // grayscale conversion; valid during Track()), the keyframe descriptor matrix of the current map
++    // (rebuilt when the map or its keyframe count changes) and the pending (not yet temporally
++    // confirmed) relocalization.
++    cv::Mat mImLeftInput;
++    Map* mpGlobalDescMap = nullptr;
++    size_t mnGlobalDescMapKFs = 0;
++    std::vector<KeyFrame*> mvpGlobalDescKFs;
++    torch::Tensor mGlobalDescMatrix;
++    int mnRelocPendingCount = 0;
++    long unsigned int mnRelocPendingFrameId = 0;
++    cv::Mat mRelocPendingTcw;
++
+     //Atlas
+     Atlas* mpAtlas;
+ 
+diff --git a/src/MLPnPsolver.cpp b/src/MLPnPsolver.cpp
+index 02f1545..d24b238 100644
+--- a/src/MLPnPsolver.cpp
++++ b/src/MLPnPsolver.cpp
+@@ -215,6 +215,9 @@ namespace ORB_SLAM3 {
+ 	    return cv::Mat();
+ 	}
+ 
++	// slam-benching patch (learned relocalization): the destructor was declared but never defined.
++	MLPnPsolver::~MLPnPsolver() {}
++
+ 	void MLPnPsolver::SetRansacParameters(double probability, int minInliers, int maxIterations, int minSet, float epsilon, float th2){
+ 		mRansacProb = probability;
+ 	    mRansacMinInliers = minInliers;
+diff --git a/src/PlaceRecognition.cc b/src/PlaceRecognition.cc
+index aacaa8a..169d3c4 100644
+--- a/src/PlaceRecognition.cc
++++ b/src/PlaceRecognition.cc
+@@ -90,6 +90,44 @@ torch::Tensor PlaceRecognition::extractDescriptor(const cv::Mat &image)
+     return result;
+ }
+ 
++torch::Tensor PlaceRecognition::extractDescriptorRaw(const cv::Mat &image, bool rgb)
++{
++    if (!mbLoaded || image.empty())
++        return torch::Tensor();
++
++    cv::Mat img;  // RGB uint8, as the offline benchmark (cv2.imread(IMREAD_COLOR)[..., ::-1])
++    if (image.channels() == 1)
++        cv::cvtColor(image, img, cv::COLOR_GRAY2RGB);
++    else if (image.channels() == 3)
++    {
++        if (rgb)
++            img = image.clone();
++        else
++            cv::cvtColor(image, img, cv::COLOR_BGR2RGB);
++    }
++    else
++        cv::cvtColor(image, img, rgb ? cv::COLOR_RGBA2RGB : cv::COLOR_BGRA2RGB);
++    if (!img.isContinuous())
++        img = img.clone();
++
++    std::lock_guard<std::mutex> lock(LightGlue::getInferenceMutex());
++    torch::NoGradGuard no_grad;
++    auto input = torch::from_blob(img.data, {1, img.rows, img.cols, 3}, torch::kUInt8).to(mDevice);
++    auto output = mModel.forward({input}).toTensor().to(torch::kFloat32).squeeze(0);
++    output = output / output.norm();
++    auto result = output.to(torch::kCPU).contiguous();
++    if (mDevice.is_cuda())
++        torch::cuda::synchronize();
++    return result;
++}
++
++void PlaceRecognition::warmUp(int width, int height)
++{
++    cv::Mat dummy(height, width, CV_8UC3, cv::Scalar(64, 128, 192));
++    for (int i = 0; i < 3; i++)
++        extractDescriptorRaw(dummy, false);
++}
++
+ void PlaceRecognition::add(KeyFrame *pKF, const torch::Tensor &descriptor)
+ {
+     if (descriptor.numel() == 0) return;
+diff --git a/src/System.cc b/src/System.cc
+index 1a6b41a..73a528e 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -192,6 +192,89 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+         }
+     }
+ 
++    // slam-benching patch (learned relocalization): MixVPR keyframe descriptors and learned
++    // relocalization candidates (see Tracking.h).
++    cv::FileNode gdNode = fsSettings["GlobalDescriptor.model_path"];
++    if (!gdNode.empty() && !((string)gdNode).empty())
++    {
++        auto pGD = std::make_shared<PlaceRecognition>((string)gdNode, true, false);
++        if (!pGD->isLoaded())
++        {
++            cerr << "GlobalDescriptor.model_path could not be loaded: " << (string)gdNode << endl;
++            exit(-1);
++        }
++        int w = fsSettings["Camera.width"].empty() ? 640 : (int)fsSettings["Camera.width"];
++        int h = fsSettings["Camera.height"].empty() ? 480 : (int)fsSettings["Camera.height"];
++        pGD->warmUp(w, h);
++        mpTracker->mpGlobalDescExtractor = pGD;
++        cout << "Global descriptor model loaded: " << (string)gdNode << endl;
++    }
++    cv::FileNode lrNode = fsSettings["LearnedReloc.enable"];
++    if (!lrNode.empty() && (int)lrNode != 0)
++    {
++        if (!mbLoadedAtlas)
++        {
++            cerr << "LearnedReloc.enable requires a loaded atlas (System.LoadAtlasFromFile)" << endl;
++            exit(-1);
++        }
++        if (!mpTracker->mpGlobalDescExtractor)
++        {
++            cerr << "LearnedReloc.enable requires GlobalDescriptor.model_path" << endl;
++            exit(-1);
++        }
++        Tracking* pT = mpTracker;
++        pT->mbLearnedReloc = true;
++        if (!fsSettings["LearnedReloc.topK"].empty()) pT->mnLearnedRelocTopK = (int)fsSettings["LearnedReloc.topK"];
++        if (!fsSettings["LearnedReloc.minInliers"].empty()) pT->mnLearnedRelocMinInliers = (int)fsSettings["LearnedReloc.minInliers"];
++        if (!fsSettings["LearnedReloc.consistentFrames"].empty()) pT->mnLearnedRelocConsistentFrames = (int)fsSettings["LearnedReloc.consistentFrames"];
++        if (!fsSettings["LearnedReloc.maxDist"].empty()) pT->mfLearnedRelocMaxDist = (float)fsSettings["LearnedReloc.maxDist"];
++        if (!fsSettings["LearnedReloc.maxAngleDeg"].empty()) pT->mfLearnedRelocMaxAngleDeg = (float)fsSettings["LearnedReloc.maxAngleDeg"];
++        if (!fsSettings["LearnedReloc.ransacEpsilon"].empty()) pT->mfLearnedRelocRansacEpsilon = (float)fsSettings["LearnedReloc.ransacEpsilon"];
++        if (!fsSettings["LearnedReloc.ransacMaxIter"].empty()) pT->mnLearnedRelocRansacMaxIter = (int)fsSettings["LearnedReloc.ransacMaxIter"];
++        if (!fsSettings["LearnedReloc.recoverDescriptors"].empty()) pT->mbLearnedRelocRecoverDesc = (int)fsSettings["LearnedReloc.recoverDescriptors"] != 0;
++        string verifier = fsSettings["LearnedReloc.verifier"].empty() ? string("lightglue") : (string)fsSettings["LearnedReloc.verifier"];
++        if (verifier != "lightglue" && verifier != "bow")
++        {
++            cerr << "LearnedReloc.verifier must be lightglue or bow, got " << verifier << endl;
++            exit(-1);
++        }
++        pT->mbLearnedRelocVerifierBoW = verifier == "bow";
++        if (!pT->mbLearnedRelocVerifierBoW && !(SPmatcher::GetLightGlue() && SPmatcher::GetLightGlue()->isLoaded()))
++        {
++            cerr << "LearnedReloc.verifier lightglue requires LightGlue.model_path" << endl;
++            exit(-1);
++        }
++        size_t nKFs = 0, nWithDesc = 0;
++        for (Map* pMap : mpAtlas->GetAllMaps())
++            for (KeyFrame* pKF : pMap->GetAllKeyFrames())
++            {
++                nKFs++;
++                if (pKF->mGlobalDescriptor.defined() && pKF->mGlobalDescriptor.numel() > 0)
++                    nWithDesc++;
++            }
++        cout << "Learned relocalization: " << nWithDesc << "/" << nKFs << " loaded keyframes have a global descriptor"
++             << ", topK " << pT->mnLearnedRelocTopK << ", min inliers " << pT->mnLearnedRelocMinInliers
++             << ", consistent frames " << pT->mnLearnedRelocConsistentFrames << ", verifier " << verifier
++             << ", RANSAC epsilon " << pT->mfLearnedRelocRansacEpsilon << " / " << pT->mnLearnedRelocRansacMaxIter
++             << " iterations, consistency " << pT->mfLearnedRelocMaxDist << " m / " << pT->mfLearnedRelocMaxAngleDeg << " deg"
++             << ", unit-norm descriptor recovery " << (pT->mbLearnedRelocRecoverDesc ? "on" : "off") << endl;
++        if (nWithDesc == 0)
++        {
++            cerr << "LearnedReloc.enable: the loaded atlas has no keyframe global descriptors "
++                    "(rebuild it with GlobalDescriptor.model_path)" << endl;
++            exit(-1);
++        }
++        cv::FileNode logNode = fsSettings["LearnedReloc.logFile"];
++        if (!logNode.empty() && !((string)logNode).empty())
++        {
++            pT->mLearnedRelocLog.open((string)logNode);
++            pT->mLearnedRelocLog << "timestamp,frame_id,mode,n_db,desc_ms,retrieval_ms,verify_ms,total_ms,"
++                "cand_kf_ids,cand_sims,cand_lg_matches,cand_mp_matches,cand_pnp_inliers,cand_final_inliers,"
++                "cand_verify_ms,best_rank,best_kf_id,best_inliers,accepted,consistent_count,confirmed,"
++                "dist_to_prev,angle_to_prev,tx,ty,tz,qx,qy,qz,qw\n";
++        }
++    }
++
+     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
+ 
+     //Initialize the Viewer thread and launch
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 14bcca2..b5b4ef8 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -38,6 +38,8 @@
+ 
+ #include<mutex>
+ #include<chrono>
++#include<iomanip>
++#include<sstream>
+ #include <include/CameraModels/Pinhole.h>
+ #include <include/CameraModels/KannalaBrandt8.h>
+ #include <include/MLPnPsolver.h>
+@@ -928,6 +930,7 @@ void Tracking::SetStepByStep(bool bSet)
+ cv::Mat Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
+ {
+ 
++    mImLeftInput = imRectLeft;  // slam-benching patch (learned relocalization)
+     mImGray = imRectLeft;
+     cv::Mat imGrayRight = imRectRight;
+     mImRight = imRectRight;
+@@ -1973,6 +1976,7 @@ void Tracking::StereoInitialization()
+ 
+         // Create KeyFrame
+         KeyFrame* pKFini = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
++        ComputeKeyFrameGlobalDescriptor(pKFini);  // slam-benching patch (learned relocalization)
+ 
+         // Insert KeyFrame in the map
+         mpAtlas->AddKeyFrame(pKFini);
+@@ -3232,6 +3236,8 @@ void Tracking::CreateNewKeyFrame()
+     }
+ 
+ 
++    ComputeKeyFrameGlobalDescriptor(pKF);  // slam-benching patch (learned relocalization)
++
+     // Compute global descriptor for place recognition
+     if (mpPlaceRecognition && mpPlaceRecognition->isLoaded())
+     {
+@@ -3517,6 +3523,8 @@ void Tracking::UpdateLocalKeyFrames()
+ 
+ bool Tracking::Relocalization()
+ {
++    if(mbLearnedReloc)
++        return LearnedRelocalization();  // slam-benching patch (learned relocalization)
+     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
+     // Compute Bag of Words Vector
+     mCurrentFrame.ComputeBoW();
+@@ -3888,6 +3896,323 @@ void Tracking::ChangeCalibration(const string &strSettingPath)
+     Frame::mbInitialComputations = true;
+ }
+ 
++// slam-benching patch (learned relocalization) ----------------------------------------------------
++void Tracking::ComputeKeyFrameGlobalDescriptor(KeyFrame* pKF)
++{
++    if(!mpGlobalDescExtractor || !mpGlobalDescExtractor->isLoaded() || !pKF)
++        return;
++    pKF->mGlobalDescriptor = mpGlobalDescExtractor->extractDescriptorRaw(
++        mImLeftInput.empty() ? mImGray : mImLeftInput, mbRGB);
++}
++
++static void SlambenchPoseDiff(const cv::Mat &Tcw1, const cv::Mat &Tcw2, float &dist, float &angleDeg)
++{
++    cv::Mat R1 = Tcw1.rowRange(0,3).colRange(0,3), R2 = Tcw2.rowRange(0,3).colRange(0,3);
++    cv::Mat O1 = -R1.t()*Tcw1.rowRange(0,3).col(3), O2 = -R2.t()*Tcw2.rowRange(0,3).col(3);
++    dist = cv::norm(O1 - O2);
++    cv::Mat dR = R1*R2.t();
++    double c = (cv::trace(dR)[0] - 1.0) / 2.0;
++    c = std::max(-1.0, std::min(1.0, c));
++    angleDeg = std::acos(c) * 180.0 / CV_PI;
++}
++
++// Upstream SPDetector::computeDescriptors divides every descriptor channel by its norm over all
++// keypoints of the image (torch::norm(desc, 2, 1) on a [256, N] tensor) instead of every descriptor by
++// its own norm. SP_SLAM3 descriptors therefore carry an image-dependent per-channel scale (|d| ~ 0.46),
++// which LightGlue tolerates for the same lighting but not across lighting (~0 matches). The scales are
++// recovered by requiring unit-norm rows, i.e. least squares for w_c = s_c^2 in sum_c w_c b_kc^2 = 1,
++// then rows are re-normalized (with fewer keypoints than channels only the row normalization is done).
++static cv::Mat SlambenchUnitNormDescriptors(const cv::Mat &desc)
++{
++    cv::Mat b;
++    desc.convertTo(b, CV_64F);
++    const int n = b.rows, d = b.cols;
++    cv::Mat out;
++    if(n >= d && d > 0)
++    {
++        cv::Mat A = b.mul(b), G, r, w;
++        cv::mulTransposed(A, G, true);
++        cv::reduce(A, r, 0, cv::REDUCE_SUM);
++        r = r.t();
++        G += cv::Mat::eye(d, d, CV_64F) * (1e-9 * cv::trace(G)[0] / d + 1e-12);
++        if(cv::solve(G, r, w, cv::DECOMP_CHOLESKY))
++        {
++            cv::Mat sc(1, d, CV_64F);
++            for(int c = 0; c < d; c++)
++                sc.at<double>(0, c) = std::sqrt(std::max(0.0, w.at<double>(c)));
++            out = b.mul(cv::repeat(sc, n, 1));
++        }
++    }
++    if(out.empty())
++        out = b.clone();
++    for(int k = 0; k < n; k++)
++    {
++        cv::Mat row = out.row(k);
++        const double nr = cv::norm(row);
++        if(nr > 1e-12)
++            row /= nr;
++    }
++    out.convertTo(out, CV_32F);
++    return out;
++}
++
++bool Tracking::LearnedRelocalization()
++{
++    typedef std::chrono::steady_clock clk;
++    auto ms = [](clk::time_point a, clk::time_point b) {
++        return std::chrono::duration<double, std::milli>(b - a).count(); };
++    const clk::time_point t0 = clk::now();
++    const bool bFromVO = !(mState==LOST || mState==RECENTLY_LOST);
++
++    // 1. Query descriptor of the current (left) image.
++    torch::Tensor q = mpGlobalDescExtractor->extractDescriptorRaw(
++        mImLeftInput.empty() ? mImGray : mImLeftInput, mbRGB);
++    const clk::time_point t1 = clk::now();
++
++    // 2. Top-K keyframes of the current map by cosine similarity (brute force).
++    Map* pMap = mpAtlas->GetCurrentMap();
++    const vector<KeyFrame*> vpAllKFs = pMap->GetAllKeyFrames();
++    if(pMap != mpGlobalDescMap || vpAllKFs.size() != mnGlobalDescMapKFs)
++    {
++        mvpGlobalDescKFs.clear();
++        vector<torch::Tensor> vDescs;
++        for(KeyFrame* pKF : vpAllKFs)
++        {
++            if(pKF->isBad() || !pKF->mGlobalDescriptor.defined() || !q.defined()
++               || pKF->mGlobalDescriptor.numel() != q.numel())
++                continue;
++            mvpGlobalDescKFs.push_back(pKF);
++            vDescs.push_back(pKF->mGlobalDescriptor.view({-1}));
++        }
++        mGlobalDescMatrix = vDescs.empty() ? torch::Tensor() : torch::stack(vDescs).contiguous();
++        mpGlobalDescMap = pMap;
++        mnGlobalDescMapKFs = vpAllKFs.size();
++    }
++    vector<KeyFrame*> vpCandidateKFs;
++    vector<float> vSims;
++    if(q.defined() && mGlobalDescMatrix.defined())
++    {
++        torch::Tensor sims = torch::mv(mGlobalDescMatrix, q);
++        const int k = std::min<int>(mnLearnedRelocTopK, mvpGlobalDescKFs.size());
++        auto top = sims.topk(k);
++        torch::Tensor vals = std::get<0>(top).contiguous(), idx = std::get<1>(top).contiguous();
++        for(int i = 0; i < k; i++)
++        {
++            KeyFrame* pKF = mvpGlobalDescKFs[idx[i].item<int64_t>()];
++            if(pKF->isBad())
++                continue;
++            vpCandidateKFs.push_back(pKF);
++            vSims.push_back(vals[i].item<float>());
++        }
++    }
++    const clk::time_point t2 = clk::now();
++
++    // 3. Verification of every candidate; the one with the most final inliers is kept.
++    const int nKFs = vpCandidateKFs.size();
++    vector<int> vnRaw(nKFs, 0), vnMP(nKFs, 0), vnPnP(nKFs, 0), vnGood(nKFs, 0);
++    vector<double> vVerifyMs(nKFs, 0.0);
++    int bestIdx = -1, bestGood = -1;
++    cv::Mat bestTcw;
++    vector<MapPoint*> vpBestMPs;
++    vector<bool> vbBestOutlier;
++
++    auto pLG = SPmatcher::GetLightGlue();
++    const cv::Size imgSize(mCurrentFrame.mnMaxX - mCurrentFrame.mnMinX, mCurrentFrame.mnMaxY - mCurrentFrame.mnMinY);
++    if(mbLearnedRelocVerifierBoW && nKFs > 0)
++        mCurrentFrame.ComputeBoW();
++    ORBmatcher matcherBoW(0.75,true);
++    ORBmatcher matcher2(0.8,true);
++    const int minInl = mnLearnedRelocMinInliers;
++    cv::Mat queryDesc;
++
++    for(int i = 0; i < nKFs; i++)
++    {
++        const clk::time_point tv0 = clk::now();
++        KeyFrame* pKF = vpCandidateKFs[i];
++        vector<MapPoint*> vpMatches(mCurrentFrame.N, static_cast<MapPoint*>(NULL));
++        if(mbLearnedRelocVerifierBoW)
++        {
++            vnMP[i] = matcherBoW.SearchByBoW(pKF, mCurrentFrame, vpMatches);
++            vnRaw[i] = -1;
++        }
++        else if(pLG && pLG->isLoaded() && !pKF->mDescriptors.empty() && !mCurrentFrame.mDescriptors.empty())
++        {
++            std::vector<LightGlueMatch> lgMatches;
++            try {
++                if(mbLearnedRelocRecoverDesc)
++            {
++                if(queryDesc.empty())
++                    queryDesc = SlambenchUnitNormDescriptors(mCurrentFrame.mDescriptors);
++                auto it = mLearnedRelocKFDesc.find(pKF);
++                if(it == mLearnedRelocKFDesc.end())
++                    it = mLearnedRelocKFDesc.emplace(pKF, SlambenchUnitNormDescriptors(pKF->mDescriptors)).first;
++                lgMatches = pLG->match(pKF->mvKeysUn, it->second, mCurrentFrame.mvKeysUn, queryDesc, imgSize);
++            }
++            else
++                lgMatches = pLG->match(pKF->mvKeysUn, pKF->mDescriptors,
++                                       mCurrentFrame.mvKeysUn, mCurrentFrame.mDescriptors, imgSize);
++            } catch (...) {
++                lgMatches.clear();
++            }
++            vnRaw[i] = lgMatches.size();
++            const vector<MapPoint*> vpKFMPs = pKF->GetMapPointMatches();
++            for(const LightGlueMatch &m : lgMatches)
++            {
++                if(m.idx0 < 0 || m.idx0 >= (int)vpKFMPs.size() || m.idx1 < 0 || m.idx1 >= mCurrentFrame.N)
++                    continue;
++                MapPoint* pMP = vpKFMPs[m.idx0];
++                if(pMP && !pMP->isBad() && !vpMatches[m.idx1])
++                {
++                    vpMatches[m.idx1] = pMP;
++                    vnMP[i]++;
++                }
++            }
++        }
++        if(vnMP[i] >= 15)
++        {
++            MLPnPsolver solver(mCurrentFrame, vpMatches);
++            // Stock relocalization: (0.99,10,300,6,0.5,5.991), i.e. a pose needs >= 50% of the
++            // matches as inliers; cross-lighting matches have lower inlier ratios, so the expected
++            // inlier ratio and iteration budget are settings (the >= minInliers gate is unchanged).
++            solver.SetRansacParameters(0.99,10,mnLearnedRelocRansacMaxIter,6,mfLearnedRelocRansacEpsilon,5.991);
++            bool bNoMore = false;
++            vector<bool> vbInliers;
++            int nInliers = 0;
++            cv::Mat Tcw;
++            while(Tcw.empty() && !bNoMore)
++                Tcw = solver.iterate(5,bNoMore,vbInliers,nInliers);
++            if(!Tcw.empty())
++            {
++                vnPnP[i] = nInliers;
++                Tcw.copyTo(mCurrentFrame.mTcw);
++                set<MapPoint*> sFound;
++                for(size_t j = 0; j < vbInliers.size(); j++)
++                {
++                    if(vbInliers[j])
++                    {
++                        mCurrentFrame.mvpMapPoints[j] = vpMatches[j];
++                        sFound.insert(vpMatches[j]);
++                    }
++                    else
++                        mCurrentFrame.mvpMapPoints[j] = NULL;
++                }
++                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                if(nGood >= 10)
++                {
++                    for(int io = 0; io < mCurrentFrame.N; io++)
++                        if(mCurrentFrame.mvbOutlier[io])
++                            mCurrentFrame.mvpMapPoints[io] = static_cast<MapPoint*>(NULL);
++                    // Same refinement as Relocalization(), with the configured inlier threshold.
++                    if(nGood < minInl)
++                    {
++                        int nadditional = matcher2.SearchByProjection(mCurrentFrame,pKF,sFound,10,ORBmatcher::TH_HIGH);
++                        if(nadditional+nGood >= minInl)
++                        {
++                            nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                            if(nGood > 30 && nGood < minInl)
++                            {
++                                sFound.clear();
++                                for(int ip = 0; ip < mCurrentFrame.N; ip++)
++                                    if(mCurrentFrame.mvpMapPoints[ip])
++                                        sFound.insert(mCurrentFrame.mvpMapPoints[ip]);
++                                nadditional = matcher2.SearchByProjection(mCurrentFrame,pKF,sFound,3,ORBmatcher::TH_LOW+0.28f*(ORBmatcher::TH_HIGH-ORBmatcher::TH_LOW));
++                                if(nGood+nadditional >= minInl)
++                                {
++                                    nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                                    for(int io = 0; io < mCurrentFrame.N; io++)
++                                        if(mCurrentFrame.mvbOutlier[io])
++                                            mCurrentFrame.mvpMapPoints[io] = NULL;
++                                }
++                            }
++                        }
++                    }
++                }
++                vnGood[i] = nGood;
++                if(nGood >= 10 && nGood > bestGood)
++                {
++                    bestGood = nGood;
++                    bestIdx = i;
++                    bestTcw = mCurrentFrame.mTcw.clone();
++                    vpBestMPs = mCurrentFrame.mvpMapPoints;
++                    vbBestOutlier = mCurrentFrame.mvbOutlier;
++                }
++            }
++        }
++        vVerifyMs[i] = ms(tv0, clk::now());
++    }
++    const clk::time_point t3 = clk::now();
++
++    // 4. Inlier gate and temporal consistency.
++    const bool bAccepted = bestIdx >= 0 && bestGood >= minInl;
++    float dDist = -1.f, dAng = -1.f;
++    if(bAccepted)
++    {
++        if(mnRelocPendingCount > 0 && mCurrentFrame.mnId == mnRelocPendingFrameId + 1)
++        {
++            SlambenchPoseDiff(mRelocPendingTcw, bestTcw, dDist, dAng);
++            if(dDist <= mfLearnedRelocMaxDist && dAng <= mfLearnedRelocMaxAngleDeg)
++                mnRelocPendingCount++;
++            else
++                mnRelocPendingCount = 1;
++        }
++        else
++            mnRelocPendingCount = 1;
++        mnRelocPendingFrameId = mCurrentFrame.mnId;
++        mRelocPendingTcw = bestTcw.clone();
++    }
++    else
++        mnRelocPendingCount = 0;
++    const bool bConfirmed = bAccepted && mnRelocPendingCount >= mnLearnedRelocConsistentFrames;
++
++    if(bConfirmed)
++    {
++        mCurrentFrame.SetPose(bestTcw);
++        mCurrentFrame.mvpMapPoints = vpBestMPs;
++        mCurrentFrame.mvbOutlier = vbBestOutlier;
++    }
++    else
++        fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(), static_cast<MapPoint*>(NULL));
++
++    if(mLearnedRelocLog.is_open())
++    {
++        auto join = [](const auto &v, auto f) {
++            std::ostringstream o;
++            for(size_t i = 0; i < v.size(); i++) o << (i ? ";" : "") << f(v[i]);
++            return o.str(); };
++        mLearnedRelocLog << std::fixed << std::setprecision(9) << mCurrentFrame.mTimeStamp << ","
++            << mCurrentFrame.mnId << "," << (bFromVO ? "vo" : "lost") << "," << mvpGlobalDescKFs.size() << ","
++            << std::setprecision(3) << ms(t0, t1) << "," << ms(t1, t2) << "," << ms(t2, t3) << "," << ms(t0, t3) << ","
++            << join(vpCandidateKFs, [](KeyFrame* k) { return k->mnId; }) << ","
++            << std::setprecision(5) << join(vSims, [](float x) { return x; }) << ","
++            << join(vnRaw, [](int x) { return x; }) << "," << join(vnMP, [](int x) { return x; }) << ","
++            << join(vnPnP, [](int x) { return x; }) << "," << join(vnGood, [](int x) { return x; }) << ","
++            << std::setprecision(1) << join(vVerifyMs, [](double x) { return x; }) << ","
++            << bestIdx << "," << (bestIdx >= 0 ? (long)vpCandidateKFs[bestIdx]->mnId : -1L) << "," << bestGood << ","
++            << (bAccepted ? 1 : 0) << "," << mnRelocPendingCount << "," << (bConfirmed ? 1 : 0) << ","
++            << std::setprecision(4) << dDist << "," << dAng;
++        if(bestIdx >= 0)
++        {
++            cv::Mat Rwc = bestTcw.rowRange(0,3).colRange(0,3).t();
++            cv::Mat Ow = -Rwc*bestTcw.rowRange(0,3).col(3);
++            vector<float> qv = Converter::toQuaternion(Rwc);
++            mLearnedRelocLog << std::setprecision(6) << "," << Ow.at<float>(0) << "," << Ow.at<float>(1) << ","
++                << Ow.at<float>(2) << "," << qv[0] << "," << qv[1] << "," << qv[2] << "," << qv[3];
++        }
++        else
++            mLearnedRelocLog << ",,,,,,,";
++        mLearnedRelocLog << "\n";
++        mLearnedRelocLog.flush();
++    }
++
++    if(!bConfirmed)
++        return false;
++    mnRelocPendingCount = 0;
++    mnLastRelocFrameId = mCurrentFrame.mnId;
++    mbRelocalizedThisFrame = true;
++    cout << "Relocalized (learned, " << bestGood << " inliers, keyframe " << vpCandidateKFs[bestIdx]->mnId << ")" << endl;
++    return true;
++}
++
+ void Tracking::SetRelocalizeOnly(const bool &flag)
+ {
+     mbRelocOnly = flag;

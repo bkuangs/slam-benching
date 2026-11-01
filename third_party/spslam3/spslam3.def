@@ -13,6 +13,11 @@ From: ubuntu:20.04
     CMakeLists.driver.txt /opt/slambench/src/CMakeLists.txt
     TorchNoToolkit.cmake /opt/slambench/src/TorchNoToolkit.cmake
     export_lightglue_slambench.py /opt/slambench/src/export_lightglue_slambench.py
+    export_mixvpr_slambench.py /opt/slambench/src/export_mixvpr_slambench.py
+    # MixVPR TorchScript model (learned relocalization, patch 0007): exported outside the build by
+    # export_mixvpr_slambench.py from the official GSV-Cities checkpoint and staged here by
+    # build_container.sh (its sha256 is recorded in versions.txt).
+    mixvpr_slambench.pt /opt/slambench/models/mixvpr.pt
     patches /opt/slambench/patches
 
 %environment
@@ -23,6 +28,7 @@ From: ubuntu:20.04
     export SPSLAM3_SUPERPOINT_MODEL=/opt/SP_SLAM3/superpoint.pt
     export SPSLAM3_VOCABULARY=/opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3
     export SPSLAM3_LIGHTGLUE_MODEL=/opt/SP_SLAM3/lightglue.pt
+    export SPSLAM3_MIXVPR_MODEL=/opt/SP_SLAM3/mixvpr.pt
 
 %post
     set -eux
@@ -97,6 +103,8 @@ From: ubuntu:20.04
     deactivate
     rm -rf /opt/src/export-venv /opt/src/torch_home /root/.cache
 
+    mv /opt/slambench/models/mixvpr.pt /opt/SP_SLAM3/mixvpr.pt && rmdir /opt/slambench/models
+
     cd /opt/slambench/src && mkdir -p build && cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release -DSPSLAM3_ROOT=/opt/SP_SLAM3 -DLIBTORCH_ROOT=/opt/libtorch && make -j${JOBS}
     mkdir -p /opt/slambench/bin && cp spslam3_driver /opt/slambench/bin/
@@ -111,6 +119,7 @@ From: ubuntu:20.04
       echo "lightglue_commit=${LIGHTGLUE_COMMIT}"
       echo "lightglue_weights_sha256=${LIGHTGLUE_WEIGHTS_SHA256}"
       echo "lightglue_model_sha256=$(sha256sum /opt/SP_SLAM3/lightglue.pt | cut -c1-64)"
+      echo "mixvpr_model_sha256=$(sha256sum /opt/SP_SLAM3/mixvpr.pt | cut -c1-64)"
       echo "superpoint_model_sha256=$(sha256sum /opt/SP_SLAM3/superpoint.pt | cut -c1-64)"
       echo "vocabulary_sha256=$(sha256sum /opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3 | cut -c1-64)"
       echo "pangolin_commit=$(git -C /opt/src/Pangolin rev-parse HEAD)"
@@ -133,6 +142,7 @@ From: ubuntu:20.04
     test -f /opt/SP_SLAM3/Vocabulary/superpoint_voc.dbow3
     test -f /opt/SP_SLAM3/superpoint.pt
     test -f /opt/SP_SLAM3/lightglue.pt
+    test -f /opt/SP_SLAM3/mixvpr.pt
     ldd /opt/slambench/bin/spslam3_driver | grep -q libtorch_cuda.so
     for f in /opt/libtorch/lib/libnvrtc-builtins.so.*; do test -e "$f"; done
     cat /opt/slambench/versions.txt

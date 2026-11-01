@@ -33,10 +33,11 @@ camera–LiDAR–IMU fusion with **cross-modal verification**.
 | 2 | Learned features do not improve single-session tracking | SP_SLAM3 5 / 9 cm vs ORB-SLAM3 3 / 8 cm (seq01/11), 4–5× slower. LAC (SuperPoint+LightGlue+GTSAM) 0.16 m after the keyframe-VO fix; 1.2–1.8 m with ORB | [lac_lunapolaris](results/lac_lunapolaris.md) |
 | 3 | The sim agrees, for an aerial survey under four lightings | ORB-SLAM3 best in all four (0.13–0.15 m); no run lost tracking | [lunaryard_aerial_lighting](results/lunaryard_aerial_lighting.md) |
 | 4 | Map reuse works under the same lighting | 92–100 % of frames localized at the mapping run's accuracy (sim nominal→nominal/dim, seq01→seq01, seq11→seq11) | [map_reuse](results/map_reuse.md) |
-| 5 | Map reuse fails when lighting changes | Sim low_sun/glare: 0 %, both systems and modes. Real seq01↔seq11: 0 % in both directions. seq01→seq02 (similar lighting) works | [map_reuse](results/map_reuse.md) |
+| 5 | Map reuse with stock (DBoW) place recognition fails when lighting changes | Sim low_sun/glare: 0 %, both systems and modes. Real seq01↔seq11: 0 % in both directions. seq01→seq02 (similar lighting) works | [map_reuse](results/map_reuse.md) |
 | 6 | Feature matching survives the lighting change; ORB does not | Cross-lighting PnP success with GT 3D: ORB 16 %, SP+NN 29 %, **SP+LightGlue 58 %**, ALIKED+LG 43 %, DISK+LG 36 % | [lunaryard_aerial_lighting](results/lunaryard_aerial_lighting.md) (cross-lighting section) |
 | 7 | Retrieval is where it breaks | Recall@1 sim nominal→low_sun: DBoW2 3 %, AnyLoc 85 %, MixVPR 56 %. Real 01→11: 3 % vs 37–39 % | [place_recognition](results/place_recognition.md) |
 | 8 | Learned retrieval + LightGlue verification fixes most of it | End to end, sim nominal→low_sun: DBoW2 15 %, learned 78–95 %, oracle 100 %. Real 01→11: 5 % vs 32–35 % (oracle 43 %). False positives ≤ 0.8 % at a 50-inlier gate. MixVPR 5 ms / 193 MB GPU per query | [place_recognition](results/place_recognition.md) |
+| 10 | Inside SP_SLAM3, learned relocalization fixes sim low_sun and partly fixes glare and real cross-day | Relocalize mode, MixVPR top-5 + LightGlue + MLPnP, 50 inliers, 3-frame gate. Sim low_sun 0 → **99.9 %** localized at map accuracy; glare 0 → 69 %. Real 11→01 0 → 32 % (first at 614 s), 01→11 0 → 71 % (first at 263 s); with a 1-frame gate, 11→01 reaches 75 % (first at 223 s). Most cross-day frames after a relocalization are VO-only, so the error is 0.4–0.7 m median. Same lighting does not regress (99.9–100 %). **0 false relocalizations.** MixVPR + stock BoW verification stays at 0 % under any lighting change. Needed a fix for an upstream SP_SLAM3 descriptor-normalization bug that zeroes cross-lighting LightGlue matches. On real data the remaining failure is verification: too few positive matches land on the sparse map's MapPoints | [map_reuse](results/map_reuse.md) (learned relocalization section) |
 | 9 | LiDAR–IMU alone fails silently on open terrain | Ground-only FAST-LIO2 diverges on every sequence (hundreds of km) and still reports 100 % coverage. Horizontal translation and yaw are unconstrained | [lidar_ground_only](research/lidar_ground_only.md) |
 
 Supporting work (method and diagnosis, not separate claims):
@@ -54,20 +55,36 @@ Supporting work (method and diagnosis, not separate claims):
 
 ## What is open (ordered by how much it strengthens the argument)
 
-1. **Close the loop inside SLAM.** Replace the ORB-SLAM3 / SP_SLAM3 `KeyFrameDatabase` candidate detection
-   with a MixVPR index stored in the atlas. Verify the top 5 with SuperPoint+LightGlue+PnP, accept at ≥ 50
-   inliers, and require temporal consistency. Rerun the [map_reuse](results/map_reuse.md) matrix. Success
-   means low_sun and seq01→seq11 move from 0 % localized, with no rise in false relocalizations. So far,
-   claim 8 is shown only offline.
+1. **Close the loop inside SLAM: done for SP_SLAM3 relocalize mode (claim 10). What remains is the real-data
+   verification gap and the merge path.** Patch 0007 / image `spslam3_9439971_r5.sif` replaces SP_SLAM3's DBoW relocalization
+   candidates with a MixVPR index stored in the atlas. It verifies the top 5 with LightGlue + MLPnP at ≥ 50
+   inliers, under a 3-frame consistency gate.
+   * Results: sim low_sun 0 → 99.9 %, glare 0 → 69 %, real 11→01 0 → 32 %, 01→11 0 → 71 %.
+     Same lighting does not regress, and there are no false relocalizations.
+   * On real cross-day data, retrieval works about as well as offline. Verification is the bottleneck: only
+     ~30 of ~73 LightGlue matches on a correct keyframe have a MapPoint in the sparse SP map, so PnP rarely
+     reaches 50 inliers.
+   * After a cross-day relocalization, 87–95 % of frames are tracked as VO-only, with too few map
+     matches and no local mapping. The pose drifts to a median error of 0.4–0.7 m.
+
+   Next steps:
+   * verify against stereo-triangulated keyframe keypoints, or against map points from neighbouring
+     keyframes, instead of only the keyframe's own MapPoints;
+   * fix the upstream SuperPoint descriptor normalization globally (it also hurts SP tracking across
+     lighting);
+   * add learned candidates to merge detection (LoopClosing);
+   * port the same retrieval to ORB-SLAM3.
 2. **Camera rescue of degenerate LiDAR.** Ground-only LiDAR + stereo, loosely coupled first, with and
    without cross-modal verification, plus an oracle. Add a degeneracy-aware LIO baseline so the camera's
    benefit is not overstated. See "Next experiments" in [lidar_ground_only](research/lidar_ground_only.md).
 3. **A fusion baseline adapter:** FAST-LIVO2, LVI-SAM or R3LIVE.
-4. **Glare (sun azimuth flipped)** is unsolved by every retrieval method. Verification still works when the right
+4. **Glare (sun azimuth flipped)** is unsolved by every retrieval method. Inside SP_SLAM3 it reaches 69 % localized, limited by retrieval: R@5 is 32 %. Verification still works when the right
    frame is proposed (58–98 %), so try a pose prior or multi-session maps (one per lighting regime).
 5. **More realistic sim:** a simulated LiDAR on the aerial renders, noise/blur, altitude and heading changes
-   between sessions, and a non-repeating ground texture. The current texture repeats every 5 m, which causes
-   most sim wrong-place matches.
+   between sessions, and a non-repeating ground texture. The current texture repeats every 5 m. This barely
+   affects recall or success (≤ 1.4 points for learned retrieval), but it causes most high-confidence
+   (≥ 50-inlier) wrong-place false positives. The sim false-positive rates therefore need re-measuring
+   on non-repeating terrain.
 6. **More real lighting variety:** LunaPolaris seq04–10 and 12 (seq09 has a documented odometry loss at
    the turn toward the light).
 

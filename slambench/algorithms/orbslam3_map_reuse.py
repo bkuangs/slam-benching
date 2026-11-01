@@ -123,7 +123,11 @@ def file_sha256(path: Path) -> str:
 
 # Settings that may differ between the mapping run and a session reusing its map.
 _FREE_SETTINGS = {"save_map", "load_map", "reuse_mode", "playback_rate", "log_features", "clahe",
-                  "clahe_clip_limit", "clahe_tile_grid", "camera_fps", "loop_closure"}
+                  "clahe_clip_limit", "clahe_tile_grid", "camera_fps", "loop_closure",
+                  # spslam3 learned relocalization (the map run's global_descriptors is checked separately)
+                  "global_descriptors", "learned_reloc", "learned_reloc_topk", "learned_reloc_min_inliers",
+                  "learned_reloc_consistent_frames", "learned_reloc_verifier",
+                  "learned_reloc_recover_descriptors"}
 
 
 def map_reuse_problems(algorithm: str, settings: Dict[str, Any]) -> List[str]:

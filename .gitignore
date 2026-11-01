@@ -14,3 +14,6 @@ slambench-*.out
 
 # Reference papers kept locally (copyrighted, large)
 /dave_thesis.pdf
+
+# MixVPR TorchScript model staged by third_party/spslam3/build_container.sh
+/third_party/spslam3/mixvpr_slambench.pt
