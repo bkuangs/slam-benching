@@ -513,11 +513,36 @@ real: inlier gate on the best of top-5 (SP+LG, cross-session pairs pooled): succ
 The real pooled numbers include the easy 01↔02 pairs.
 
 **What the sim gross false positives are.** Almost all of them are verifications against a database
-frame at a different place, often with 100–300 SuperPoint inliers. The pose errors cluster at
-multiples of 5 m (5, 10, 15, 20, 25 m). The cause is that the sim terrain material (`Basalt`,
-`texture_scale 0.2`) **repeats its texture every 5 m**, so two places 5·n m apart can have
-pixel-identical ground texture. The texture repetition is a simulator artifact, but it is a fair
-stress test: real regolith is also self-similar.
+frame at a different place. The sim terrain material (`Basalt`, `texture_scale 0.2`) **repeats its
+texture every 5 m**, so two places 5·n m apart can have pixel-identical ground texture. The texture
+repetition is a simulator artifact, but it is a fair stress test: real regolith is also self-similar.
+
+How much the repeat matters was measured with `scripts/vpr_texture_alias.py`, which reads the
+`rank_*.npz` / `e2e.csv` outputs and the session poses. A wrong
+match counts as **aliased** when its xy offset from the query is within 0.5 m of a multiple of 5 m in
+both axes, with a heading difference under 30°. By chance, 6.7 % of wrong frames meet this criterion.
+
+The data are the 12 cross-lighting pairs, SP+LG verification, GT depth and top-5. Percentages are of all
+queries:
+
+| retrieval | wrong top-1, aliased | R@1 (upper bound without aliasing) | gross FP ≥ 20 inl. (aliased share) | gross FP ≥ 50 inl. (aliased share) |
+|---|---|---|---|---|
+| DBoW2 | 6.0 % | 12.1 (≤ 18.1) | 8.0 % (48 %) | 3.3 % (62 %) |
+| AnyLoc | 1.6 % | 47.2 (≤ 48.8) | 3.0 % (13 %) | 0.3 % (55 %) |
+| MixVPR | 2.7 % | 36.5 (≤ 39.2) | 4.9 % (28 %) | 0.8 % (74 %) |
+| CosPlace | 5.4 % | 19.0 (≤ 24.4) | 5.2 % (34 %) | 0.8 % (83 %) |
+
+- **Retrieval is not driven by the repeat.** Aliased frames make up 3–7 % of wrong top-1 retrievals,
+  about the chance rate. Retrieval misses come from the lighting change, not from repeated texture.
+  Removing the repeat would raise R@1 by at most 1.6–6 points.
+- **The repeat creates the confident false positives.** Non-aliased gross false positives are far away
+  (median 27 m) with weak support (median 23 inliers), and the 50-inlier gate removes most of them. The
+  aliased ones survive the gate: they are 55–83 % of the gross false positives at ≥ 50 inliers. That is
+  48 % for DBoW2 already at ≥ 20 inliers.
+- **The effect on headline rates is small for learned retrieval.** Aliased gross false positives are
+  0.4 % (AnyLoc) and 1.4 % (MixVPR) of queries, against 3.8 % for DBoW2. Success could rise by at most
+  that much without the repeat. The sim false-positive rates after the 50-inlier gate are therefore
+  mostly a texture-repeat measurement, and should be re-measured on non-repeating terrain.
 
 - DBoW2 retrieval proposes such aliased frames often, because it scores local texture words.
 - Learned global descriptors also encode layout (rocks, craters, shadows) and propose them less:
@@ -594,8 +619,8 @@ stress test: real regolith is also self-similar.
   - The oracle rates here (nominal→low_sun 100%, nominal→glare 65%) are higher than the
     feature-level study's (65% / 26%). That study averaged over query offsets up to 30 frames
     (~4 m).
-- **The sim texture repeats every 5 m** (above). This inflates false positives for any
-  texture-based method.
+- **The sim texture repeats every 5 m** (above). It barely affects recall or success, but it
+  accounts for most high-inlier wrong-place false positives.
 - **Real sequences drive nearly the same path.** The "map" is a set of database frames with GT
   poses and stereo depth, not a SLAM map. A real system adds its own map error.
   - The 0.1 m / 2° success threshold is strict relative to SGBM depth quality, so many correct-place
