@@ -37,7 +37,7 @@ camera–LiDAR–IMU fusion with **cross-modal verification**.
 | 6 | Feature matching survives the lighting change; ORB does not | Cross-lighting PnP success with GT 3D: ORB 16 %, SP+NN 29 %, **SP+LightGlue 58 %**, ALIKED+LG 43 %, DISK+LG 36 % | [lunaryard_aerial_lighting](results/lunaryard_aerial_lighting.md) (cross-lighting section) |
 | 7 | Retrieval is where it breaks | Recall@1 sim nominal→low_sun: DBoW2 3 %, AnyLoc 85 %, MixVPR 56 %. Real 01→11: 3 % vs 37–39 % | [place_recognition](results/place_recognition.md) |
 | 8 | Learned retrieval + LightGlue verification fixes most of it | End to end, sim nominal→low_sun: DBoW2 15 %, learned 78–95 %, oracle 100 %. Real 01→11: 5 % vs 32–35 % (oracle 43 %). False positives ≤ 0.8 % at a 50-inlier gate. MixVPR 5 ms / 193 MB GPU per query | [place_recognition](results/place_recognition.md) |
-| 10 | Inside SP_SLAM3, learned relocalization fixes sim low_sun and partly fixes glare and real cross-day | Relocalize mode, MixVPR top-5 + LightGlue + MLPnP, 50 inliers, 3-frame gate. Sim low_sun 0 → **99.9 %** localized at map accuracy; glare 0 → 69 %. Real 11→01 0 → 32 % (first at 614 s), 01→11 0 → 71 % (first at 263 s); with a 1-frame gate, 11→01 reaches 75 % (first at 223 s). Most cross-day frames after a relocalization are VO-only, so the error is 0.4–0.7 m median. Same lighting does not regress (99.9–100 %). **0 false relocalizations.** MixVPR + stock BoW verification stays at 0 % under any lighting change. Needed a fix for an upstream SP_SLAM3 descriptor-normalization bug that zeroes cross-lighting LightGlue matches. On real data the remaining failure is verification: too few positive matches land on the sparse map's MapPoints | [map_reuse](results/map_reuse.md) (learned relocalization section) |
+| 10 | Inside SP_SLAM3, learned relocalization fixes sim low_sun and partly fixes glare and real cross-day; map-anchored tracking makes the cross-day poses accurate | Relocalize mode, MixVPR top-5 + LightGlue + MLPnP, 50 inliers. r5 (3-frame gate): sim low_sun 0 → **99.9 %** localized at map accuracy; glare 0 → 69 %; real 11→01 0 → 32 % (first at 614 s), 01→11 0 → 71 % (first at 263 s); median error 0.66–0.67 m, because 93–95 % of localized cross-day frames are VO-only. r6 (patch 0008: global unit SuperPoint descriptors + LightGlue map anchoring when map matches drop): real cross-day median error **0.67 → 0.10 m** (01→11) and **0.66 → 0.17 m** (11→01), medians of 3 runs; VO-only 93–95 % → 33–42 %; sim glare 69 → **98 %**. With a 1-frame gate (r6, medians of 3): **90 %** localized on 01→11 and **93 %** on 11→01, first at 76 / 60 s, median 0.095 / 0.160 m. Same lighting stays at 99.9–100 % localized. With the default threshold, the 01→02 median error rises from 0.22 to 0.42 m; a stricter `sp_th_high` fixes that (0.10 m) but breaks cross-day tracking. **0 false relocalizations** in every run. MixVPR + stock BoW verification stays at 0 % under any lighting change. The remaining real-data limit is verification: about 1 % of correct cross-day candidates reach 50 PnP inliers | [map_reuse](results/map_reuse.md) (learned relocalization sections) |
 | 9 | LiDAR–IMU alone fails silently on open terrain | Ground-only FAST-LIO2 diverges on every sequence (hundreds of km) and still reports 100 % coverage. Horizontal translation and yaw are unconstrained | [lidar_ground_only](research/lidar_ground_only.md) |
 
 Supporting work (method and diagnosis, not separate claims):
@@ -55,23 +55,40 @@ Supporting work (method and diagnosis, not separate claims):
 
 ## What is open (ordered by how much it strengthens the argument)
 
-1. **Close the loop inside SLAM: done for SP_SLAM3 relocalize mode (claim 10). What remains is the real-data
-   verification gap and the merge path.** Patch 0007 / image `spslam3_9439971_r5.sif` replaces SP_SLAM3's DBoW relocalization
-   candidates with a MixVPR index stored in the atlas. It verifies the top 5 with LightGlue + MLPnP at ≥ 50
-   inliers, under a 3-frame consistency gate.
-   * Results: sim low_sun 0 → 99.9 %, glare 0 → 69 %, real 11→01 0 → 32 %, 01→11 0 → 71 %.
-     Same lighting does not regress, and there are no false relocalizations.
-   * On real cross-day data, retrieval works about as well as offline. Verification is the bottleneck: only
-     ~30 of ~73 LightGlue matches on a correct keyframe have a MapPoint in the sparse SP map, so PnP rarely
-     reaches 50 inliers.
-   * After a cross-day relocalization, 87–95 % of frames are tracked as VO-only, with too few map
-     matches and no local mapping. The pose drifts to a median error of 0.4–0.7 m.
+1. **Close the loop inside SLAM: done for SP_SLAM3 relocalize mode (claim 10). What remains is cross-day
+   recall (verification) and the merge path.**
+   * Patch 0007 / image `spslam3_9439971_r5.sif` replaces SP_SLAM3's DBoW relocalization candidates with a
+     MixVPR index stored in the atlas. It verifies the top 5 with LightGlue + MLPnP at ≥ 50 inliers, under a
+     3-frame consistency gate.
+   * Patch 0008 / image `spslam3_9439971_r6.sif` adds three opt-in fixes (all default off):
+     * global per-keypoint descriptor normalization (`sp_unit_descriptors`, with recalibrated thresholds);
+     * a denser keyframe policy (`kf_*`);
+     * map anchoring: when map matches drop, LightGlue-match the frame to covisible map keyframes, then run
+       motion-only BA (`map_anchor`).
+   * Ablation result (real cross-day, relocalize mode):
+     * **Map anchoring is the fix that matters.** Median error goes from 0.67 / 0.66 m to 0.10 / 0.17 m,
+       and VO-only frames from 93–95 % to 33–42 %. Anchored frames track at the same-day error level.
+     * Unit descriptors improve mapping ATE (seq01 0.050 → 0.041 m, seq11 0.091–0.098 → 0.061 m) and sim
+       glare (69 → 98 % localized). They help anchoring on 11→01, but cost accuracy on seq01→seq02 (median
+       0.22 → 0.42 m). The cause is the looser matcher threshold (`sp_th_high` 1.19). A strict 0.75
+       fixes same-day reuse (01→02 0.10 m, 01→01 RMSE 0.40 → 0.05 m), but breaks cross-day tracking
+       (11→01 VO-only 0.88, median 0.58 m). It is a trade-off, so each setting fits a different use.
+     * Denser maps (2.6–3.8× the keyframes, 1.8–2.0 GB atlases) improve ATE slightly but do not help across
+       days: the cross-day gate pass rate stays at ~0.7–1 %.
+     * On the final configuration (unit descriptors + anchoring), the 1-frame gate beats the 3-frame
+       gate on every cross-day metric (localized 0.69 / 0.75 → 0.90 / 0.93) with no false
+       relocalizations. It is the recommended cross-day setting; the default stays at 3.
+   * The DBoW3 vocabulary was trained on the old descriptors. With unit descriptors the mapping ATE does not
+     degrade. Loop closing never fires in these runs, so its effect on loop closure is untested.
+   * The remaining limit is verification. Only ~0.3–1 % of correct cross-day candidates reach 50 PnP
+     inliers, and fewer than 4 % of anchor attempts succeed. Densifying the map does not change this.
 
    Next steps:
    * verify against stereo-triangulated keyframe keypoints, or against map points from neighbouring
      keyframes, instead of only the keyframe's own MapPoints;
-   * fix the upstream SuperPoint descriptor normalization globally (it also hurts SP tracking across
-     lighting);
+   * try an inlier gate that scales with the match count;
+   * a matcher threshold that adapts to the tracking state, to get both the same-day (strict) and the
+     cross-day (loose) behaviour;
    * add learned candidates to merge detection (LoopClosing);
    * port the same retrieval to ORB-SLAM3.
 2. **Camera rescue of degenerate LiDAR.** Ground-only LiDAR + stereo, loosely coupled first, with and

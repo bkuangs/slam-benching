@@ -81,10 +81,15 @@ LEGACY_DRIVER_SOURCE_SHA1 = {
     "3fc07c4b60ad6e1c5564bfa178fd55fe19e831c6": "spslam3_9439971_r3.sif: before learned relocalization (patch 0007)",
     "af171357f101d83cf7599de2665aa54b6ed77050": "spslam3_9439971_r4.sif: patch 0007 without the unit-norm "
                                                 "descriptor recovery of the LightGlue verifier",
+    "9be049ce57cce22a2e59d986c38c09fc1f0c4fca": "spslam3_9439971_r5.sif: before the descriptor fix, keyframe "
+                                                "density and map anchoring settings (patch 0008)",
 }
 # Legacy images that already have map reuse (patch 0006); they only lack the learned-relocalization settings.
 MAP_REUSE_LEGACY_DRIVER_SOURCE_SHA1 = {"3fc07c4b60ad6e1c5564bfa178fd55fe19e831c6",
-                                       "af171357f101d83cf7599de2665aa54b6ed77050"}
+                                       "af171357f101d83cf7599de2665aa54b6ed77050",
+                                       "9be049ce57cce22a2e59d986c38c09fc1f0c4fca"}
+# Legacy images with the current learned relocalization (patch 0007); they only lack the patch-0008 settings.
+LEARNED_RELOC_LEGACY_DRIVER_SOURCE_SHA1 = {"9be049ce57cce22a2e59d986c38c09fc1f0c4fca"}
 # Legacy images with learned relocalization that always behave as learned_reloc_recover_descriptors: false.
 LEARNED_RELOC_NO_RECOVERY_DRIVER_SOURCE_SHA1 = {"af171357f101d83cf7599de2665aa54b6ed77050"}
 
@@ -136,6 +141,134 @@ LEARNED_RELOC_DEFAULTS: Dict[str, Any] = {
     "learned_reloc_recover_descriptors": True,
 }
 LEARNED_RELOC_VERIFIERS = ("lightglue", "bow")
+
+
+# Descriptor fix, keyframe density and map anchoring (patch 0008); added to the resolved settings only
+# when used. None = upstream SP_SLAM3 behaviour.
+SP_FIX_DEFAULTS: Dict[str, Any] = {
+    # Unit-norm SuperPoint descriptors (upstream normalizes every channel over the image's keypoints)
+    "sp_unit_descriptors": False,
+    # SPmatcher L2 thresholds; None -> upstream 0.25 / 0.55, or with sp_unit_descriptors the
+    # equal-recall unit-descriptor values (scripts/sp_descriptor_threshold_calibration.py)
+    "sp_th_low": None,
+    "sp_th_high": None,
+    # Scale of unit descriptors before DBoW3 quantization (vocabulary trained on per-channel-normalized
+    # descriptors of norm ~sqrt(256 / keypoints)); None -> 1, or sqrt(256 / sp_n_features) with
+    # sp_unit_descriptors
+    "sp_bow_descriptor_scale": None,
+    # Keyframe insertion (Tracking::NeedNewKeyFrame / CreateNewKeyFrame); None -> upstream 100 / 70 / 0.75 / 100
+    "kf_close_tracked": None,
+    "kf_close_non_tracked": None,
+    "kf_ref_ratio": None,
+    "kf_max_points": None,
+    # Map anchoring of visual-odometry frames in localization mode (see patch 0008, Tracking.h)
+    "map_anchor": False,
+    "map_anchor_k": 3,
+    "map_anchor_min_inliers": 30,
+    "map_anchor_period": 1,
+    "map_anchor_max_kf_dist": 5.0,
+    "map_anchor_max_kf_angle_deg": 45.0,
+    "map_anchor_max_correction": 2.0,
+    "map_anchor_max_correction_deg": 15.0,
+}
+# Unit-norm equivalents of TH_LOW 0.25 / TH_HIGH 0.55 (scripts/sp_descriptor_threshold_calibration.py on
+# LunaPolaris seq01 stereo and temporal LightGlue matches): TH_LOW at equal true-match recall (0.516 for
+# both pair types); TH_HIGH 0.55 accepts every true match and every nearest impostor, so it is scaled by
+# the median per-channel-normalized descriptor norm (0.463).
+SP_UNIT_TH_LOW = 0.52
+SP_UNIT_TH_HIGH = 1.19
+MAP_ANCHOR_LOG = "map_anchor.csv"
+
+
+def sp_fix_effective(s: Dict[str, Any]) -> Dict[str, Any]:
+    """Thresholds / BoW scale actually used (None = key not written, upstream value)."""
+    unit = bool(s.get("sp_unit_descriptors"))
+    th_low = s.get("sp_th_low", None)
+    th_high = s.get("sp_th_high", None)
+    bow = s.get("sp_bow_descriptor_scale", None)
+    if unit:
+        th_low = SP_UNIT_TH_LOW if th_low is None else th_low
+        th_high = SP_UNIT_TH_HIGH if th_high is None else th_high
+        bow = (256.0 / float(s["sp_n_features"])) ** 0.5 if bow is None else bow
+    return {"th_low": th_low, "th_high": th_high, "bow_scale": bow}
+
+
+def resolve_sp_fix_settings(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the patch-0008 settings of a resolved settings dict (in place)."""
+    for k in ("sp_unit_descriptors", "map_anchor"):
+        if not isinstance(out[k], bool):
+            raise ValueError(f"{k} must be true or false, got {out[k]!r}")
+    for k in ("sp_th_low", "sp_th_high", "sp_bow_descriptor_scale", "kf_ref_ratio",
+              "map_anchor_max_kf_dist", "map_anchor_max_kf_angle_deg", "map_anchor_max_correction",
+              "map_anchor_max_correction_deg"):
+        v = out[k]
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0):
+            raise ValueError(f"{k} must be a number > 0, got {v!r}")
+    for k in ("kf_close_tracked", "kf_close_non_tracked", "kf_max_points", "map_anchor_k",
+              "map_anchor_min_inliers", "map_anchor_period"):
+        v = out[k]
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < (0 if k.startswith("kf_") else 1)):
+            raise ValueError(f"{k} must be an integer >= {0 if k.startswith('kf_') else 1}, got {v!r}")
+    eff = sp_fix_effective(out)
+    if eff["th_low"] is not None and eff["th_high"] is not None and not eff["th_low"] < eff["th_high"]:
+        raise ValueError(f"sp_th_low must be < sp_th_high, got {eff['th_low']} / {eff['th_high']}")
+    if out["map_anchor"]:
+        if out.get("load_map") is None or out.get("reuse_mode") != "relocalize":
+            raise ValueError("map_anchor needs load_map with reuse_mode: relocalize")
+        if not out["lightglue"]:
+            raise ValueError("map_anchor needs lightglue: true")
+    if out["map_anchor_min_inliers"] < 15:
+        raise ValueError("map_anchor_min_inliers must be >= 15 (TrackLocalMap's own minimum)")
+    return out
+
+
+def sp_fix_yaml_lines(s: Dict[str, Any], algo_dir: Path) -> List[str]:
+    """SuperPoint.* / SPmatcher.* / Tracking.kf* / MapAnchor.* keys of the settings file; empty when unused."""
+    lines = []
+    eff = sp_fix_effective(s)
+    if s.get("sp_unit_descriptors"):
+        lines.append("SuperPoint.unitDescriptors: 1")
+    if eff["bow_scale"] is not None:
+        lines.append(f"SuperPoint.bowDescriptorScale: {_positional(eff['bow_scale'])}")
+    if eff["th_low"] is not None:
+        lines.append(f"SPmatcher.thLow: {_positional(eff['th_low'])}")
+    if eff["th_high"] is not None:
+        lines.append(f"SPmatcher.thHigh: {_positional(eff['th_high'])}")
+    for k, key in (("kf_close_tracked", "kfCloseTracked"), ("kf_close_non_tracked", "kfCloseNonTracked"),
+                   ("kf_max_points", "kfMaxPoints")):
+        if s.get(k) is not None:
+            lines.append(f"Tracking.{key}: {int(s[k])}")
+    if s.get("kf_ref_ratio") is not None:
+        lines.append(f"Tracking.kfRefRatio: {_positional(s['kf_ref_ratio'])}")
+    if s.get("map_anchor"):
+        lines += ["MapAnchor.enable: 1",
+                  f"MapAnchor.k: {int(s['map_anchor_k'])}",
+                  f"MapAnchor.minInliers: {int(s['map_anchor_min_inliers'])}",
+                  f"MapAnchor.period: {int(s['map_anchor_period'])}",
+                  f"MapAnchor.maxKFDist: {_positional(s['map_anchor_max_kf_dist'])}",
+                  f"MapAnchor.maxKFAngleDeg: {_positional(s['map_anchor_max_kf_angle_deg'])}",
+                  f"MapAnchor.maxCorrection: {_positional(s['map_anchor_max_correction'])}",
+                  f"MapAnchor.maxCorrectionDeg: {_positional(s['map_anchor_max_correction_deg'])}",
+                  f'MapAnchor.logFile: "{(Path(algo_dir).resolve() / MAP_ANCHOR_LOG)}"']
+    return lines
+
+
+def summarize_map_anchor(path: Path) -> Dict[str, Any]:
+    """Summary of the driver's per-attempt map-anchoring log (map_anchor.csv)."""
+    import csv
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    out: Dict[str, Any] = {"n_attempts": len(rows), "n_accepted": sum(r["accepted"] == "1" for r in rows)}
+    if rows:
+        msv = np.array([float(r["ms"]) for r in rows])
+        out["ms"] = {"median": float(np.median(msv)), "p95": float(np.percentile(msv, 95))}
+        acc = [r for r in rows if r["accepted"] == "1"]
+        if acc:
+            c = np.array([float(r["correction_m"]) for r in acc])
+            li = np.array([float(r["local_inliers"]) for r in acc])
+            out["accepted_correction_m"] = {"median": float(np.median(c)), "p95": float(np.percentile(c, 95))}
+            out["accepted_local_inliers"] = {"median": float(np.median(li))}
+    return out
 
 
 def resolve_learned_reloc_settings(out: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,7 +352,7 @@ class SpSlam3Adapter(OrbSlam3Adapter):
 
     def resolve_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         unknown = (set(settings) - set(DEFAULT_SETTINGS) - set(mr.MAP_REUSE_DEFAULTS)
-                   - set(LEARNED_RELOC_DEFAULTS))
+                   - set(LEARNED_RELOC_DEFAULTS) - set(SP_FIX_DEFAULTS))
         if unknown:
             raise ValueError(f"unknown spslam3 settings: {sorted(unknown)}")
         out = dict(DEFAULT_SETTINGS)
@@ -229,11 +362,15 @@ class SpSlam3Adapter(OrbSlam3Adapter):
             out.update(mr.MAP_REUSE_DEFAULTS)
         if set(settings) & set(LEARNED_RELOC_DEFAULTS):
             out.update(LEARNED_RELOC_DEFAULTS)
+        if set(settings) & set(SP_FIX_DEFAULTS):
+            out.update(SP_FIX_DEFAULTS)
         out.update(settings)
         if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
             mr.resolve_map_reuse_settings(out)
         if set(settings) & set(LEARNED_RELOC_DEFAULTS):
             resolve_learned_reloc_settings(out)
+        if set(settings) & set(SP_FIX_DEFAULTS):
+            resolve_sp_fix_settings(out)
         if out["loop_closure"] is not True:
             raise ValueError("SP_SLAM3 cannot disable loop closing; loop_closure must be true")
         for k in ("sp_n_features", "sp_n_levels", "clahe_tile_grid"):
@@ -270,7 +407,15 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                             f"(got {calib.left.model}, rectified={calib.left.rectified})")
         problems += self._map_reuse_validate(mode, settings)
         problems += self._learned_reloc_validate(settings)
+        problems += self._sp_fix_validate(settings)
         return problems
+
+    def _sp_fix_validate(self, settings) -> List[str]:
+        used = [k for k in SP_FIX_DEFAULTS if k in settings and settings[k] != SP_FIX_DEFAULTS[k]]
+        if used and getattr(self, "_legacy_driver", None):
+            return [f"{', '.join(used)} need an image built with patch 0008; {self.container} is "
+                    f"{self._legacy_driver}"]
+        return []
 
     def _map_reuse_validate(self, mode, settings) -> List[str]:
         legacy = getattr(self, "_legacy_driver", None)
@@ -293,7 +438,7 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                 problems.append("learned_reloc_recover_descriptors: true needs an image with the current "
                                 f"patch 0007; {self.container} is {self._legacy_driver} "
                                 "(set it to false to reproduce that image's runs)")
-        elif getattr(self, "_legacy_driver", None):
+        elif getattr(self, "_legacy_driver", None) and legacy_sha1 not in LEARNED_RELOC_LEGACY_DRIVER_SOURCE_SHA1:
             problems.append("global_descriptors / learned_reloc need an image built with patch 0007; "
                             f"{self.container} is {self._legacy_driver}")
         if settings.get("learned_reloc") and mr.loading(settings):
@@ -381,6 +526,7 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                   "Viewer.ViewpointF: 500.0"]
         lines += mr.settings_yaml_lines(s, ctx.algo_dir)
         lines += learned_reloc_yaml_lines(s, ctx.algo_dir)
+        lines += sp_fix_yaml_lines(s, ctx.algo_dir)
         return "\n".join(lines) + "\n"
 
     def prepare(self, ctx: RunContext) -> None:
@@ -397,6 +543,13 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                 out.extra["learned_reloc"] = summarize_learned_reloc(log)
             except Exception as exc:  # noqa: BLE001 - diagnostics only; never fail collection
                 out.extra["learned_reloc"] = {"error": f"{type(exc).__name__}: {exc}"}
+        log = ctx.algo_dir / MAP_ANCHOR_LOG
+        if ctx.settings.get("map_anchor") and log.exists():
+            out.artifacts["map_anchor"] = log
+            try:
+                out.extra["map_anchor"] = summarize_map_anchor(log)
+            except Exception as exc:  # noqa: BLE001 - diagnostics only; never fail collection
+                out.extra["map_anchor"] = {"error": f"{type(exc).__name__}: {exc}"}
         return out
 
     def command(self, ctx: RunContext) -> List[str]:

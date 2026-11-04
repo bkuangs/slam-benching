@@ -216,6 +216,7 @@ def test_diagnose_classifies_retrieval_and_verification():
             row(102 * 10**9, [3, 1], False),                   # positive (30 m, 1 m away) but not verified
             ]
     rows.append(row(102 * 10**9, [3], True, 25.0))           # wrong-place accept
+    rows[0]["cand_final_inliers"] = [60, 0]
     res = diagnose(rows, kf_ts, gt_a, gt_b, np.eye(3), np.zeros(3), np.eye(4), positive_m=2.0)
     outs = [d["outcome"] for d in res["attempts"]]
     assert outs == ["accepted", "retrieval_miss", "verification_fail", "accepted"]
@@ -226,3 +227,6 @@ def test_diagnose_classifies_retrieval_and_verification():
     assert s["n_accepted_single_frame"] == 2 and s["n_false_single_frame_accepts"] == 1
     assert s["n_confirmed"] == 1 and s["n_false_confirmed"] == 0
     assert s["accept_rate_given_positive_retrieved"] == pytest.approx(2 / 3)
+    pc = s["positive_candidates"]
+    assert (pc["n"], pc["n_pass_gate"], pc["min_inliers"]) == (3, 1, 50)
+    assert pc["lg_median"] == 100 and pc["final_median"] == 0

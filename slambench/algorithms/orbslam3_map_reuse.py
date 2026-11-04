@@ -127,7 +127,15 @@ _FREE_SETTINGS = {"save_map", "load_map", "reuse_mode", "playback_rate", "log_fe
                   # spslam3 learned relocalization (the map run's global_descriptors is checked separately)
                   "global_descriptors", "learned_reloc", "learned_reloc_topk", "learned_reloc_min_inliers",
                   "learned_reloc_consistent_frames", "learned_reloc_verifier",
-                  "learned_reloc_recover_descriptors"}
+                  "learned_reloc_recover_descriptors",
+                  # spslam3 map anchoring (session B only)
+                  "map_anchor", "map_anchor_k", "map_anchor_min_inliers", "map_anchor_period",
+                  "map_anchor_max_kf_dist", "map_anchor_max_kf_angle_deg", "map_anchor_max_correction",
+                  "map_anchor_max_correction_deg",
+                  # spslam3 matcher thresholds and keyframe policy: not stored in the map
+                  # (sp_unit_descriptors / sp_bow_descriptor_scale change the stored descriptors and must match)
+                  "sp_th_low", "sp_th_high", "kf_close_tracked", "kf_close_non_tracked", "kf_ref_ratio",
+                  "kf_max_points"}
 
 
 def map_reuse_problems(algorithm: str, settings: Dict[str, Any]) -> List[str]:
@@ -144,8 +152,12 @@ def map_reuse_problems(algorithm: str, settings: Dict[str, Any]) -> List[str]:
     if cfg["algorithm"]["name"] != algorithm:
         return [f"load_map: atlas was saved by {cfg['algorithm']['name']}, not {algorithm}"]
     theirs = cfg["algorithm"].get("settings") or {}
+    # absent, None and false are all "unset" (optional settings are only resolved when used)
+    def unset(v):
+        return v is None or v is False
     diff = sorted(k for k in set(theirs) | set(settings)
-                  if k not in _FREE_SETTINGS and theirs.get(k) != settings.get(k))
+                  if k not in _FREE_SETTINGS and theirs.get(k) != settings.get(k)
+                  and not (unset(theirs.get(k)) and unset(settings.get(k))))
     if diff:
         return ["load_map: feature/stereo settings must equal the mapping run's; differing: "
                 + ", ".join(f"{k}: map={theirs.get(k)} here={settings.get(k)}" for k in diff)]

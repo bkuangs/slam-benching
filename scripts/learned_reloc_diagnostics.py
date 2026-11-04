@@ -68,7 +68,8 @@ def run_one(run: Path) -> dict:
     pos_m = POSITIVE_M.get(cfg["dataset"]["name"], 1.0)
     res = diagnose(rows, kf_ts, gt_cam0(map_cfg), gt_cam0(cfg), fixed["R"], fixed["t"],
                    np.array(loaded["T_final_map"]), pos_m,
-                   max_dt_s=cfg.get("evaluation", {}).get("association_max_dt_s", 0.02))
+                   max_dt_s=cfg.get("evaluation", {}).get("association_max_dt_s", 0.02),
+                   min_inliers=int(cfg["algorithm"]["settings"].get("learned_reloc_min_inliers", 50)))
     res["summary"].update({"run": str(run), "positive_m": pos_m, "positive_deg": 30.0,
                            "map_run": str(map_run)})
     out = run / "eval" / "learned_reloc_diagnostics.json"
@@ -95,9 +96,13 @@ def main():
         for k in keys:
             v = s.get(k)
             vals.append("—" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v)))
+        pc = s.get("positive_candidates", {})
         print(f"| {p.name} | " + " | ".join(vals) +
               f" | {s.get('desc_ms', {}).get('median', float('nan')):.1f} | "
-              f"{s.get('verify_ms', {}).get('median', float('nan')):.1f} |")
+              f"{s.get('verify_ms', {}).get('median', float('nan')):.1f} |"
+              + (f" positives: {pc['n_pass_gate']} of {pc['n']} pass the gate; median LightGlue / MapPoint / "
+                 f"PnP / final {pc['lg_median']:.0f} / {pc['mp_median']:.0f} / {pc['pnp_median']:.0f} / "
+                 f"{pc['final_median']:.0f}" if pc else ""))
 
 
 if __name__ == "__main__":

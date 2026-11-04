@@ -76,7 +76,7 @@ def _gt_lookup(ts_ns: Sequence[int], gt_ts: np.ndarray, gt_T: np.ndarray, max_dt
 def diagnose(rows: List[Dict[str, Any]], kf_ts: Dict[int, int], gt_a: tuple, gt_b: tuple,
              R_map: np.ndarray, t_map: np.ndarray, T_final_map: np.ndarray, positive_m: float,
              positive_deg: float = 30.0, false_m: float = 0.5, false_deg: float = 15.0,
-             max_dt_s: float = 0.02) -> Dict[str, Any]:
+             max_dt_s: float = 0.02, min_inliers: int = 50) -> Dict[str, Any]:
     """Classify every attempt. gt_a / gt_b: (timestamps_ns [N], camera poses T_gt_cam [N,4,4]) of the
     mapping / query session; R_map, t_map: the mapping run's map->GT alignment; T_final_map: the
     driver's active-map -> saved-final-frame transform (loaded_map.json)."""
@@ -117,10 +117,10 @@ def diagnose(rows: List[Dict[str, Any]], kf_ts: Dict[int, int], gt_a: tuple, gt_
         else:
             d["outcome"] = "verification_fail"
         per.append(d)
-    return {"attempts": per, "summary": summarize(rows, per)}
+    return {"attempts": per, "summary": summarize(rows, per, min_inliers)}
 
 
-def summarize(rows: List[Dict[str, Any]], per: List[Dict[str, Any]]) -> Dict[str, Any]:
+def summarize(rows: List[Dict[str, Any]], per: List[Dict[str, Any]], min_inliers: int = 50) -> Dict[str, Any]:
     n = len(rows)
     s: Dict[str, Any] = {"n_attempts": n}
     if not n:
@@ -147,6 +147,23 @@ def summarize(rows: List[Dict[str, Any]], per: List[Dict[str, Any]]) -> Dict[str
         best_mp = [max([m for m, p in zip(r["cand_mp_matches"], d["cand_positive"]) if p] or [0])
                    for r, d in pos_rows]
         s["positive_candidate_mp_matches_median"] = float(np.median(best_mp))
+    # every GT-positive candidate: matches at each verification stage and the inlier gate
+    stages = {"lg": "cand_lg_matches", "mp": "cand_mp_matches", "pnp": "cand_pnp_inliers",
+              "final": "cand_final_inliers"}
+    cand = {k: [] for k in stages}
+    for r, d in zip(rows, per):
+        for i, p in enumerate(d["cand_positive"]):
+            if p:
+                for k, col in stages.items():
+                    cand[k].append(r[col][i] if i < len(r[col]) else 0)
+    if cand["final"]:
+        fin = np.array(cand["final"])
+        s["positive_candidates"] = {
+            "n": int(fin.size), "min_inliers": int(min_inliers),
+            "n_pass_gate": int((fin >= min_inliers).sum()),
+            "pass_rate": float((fin >= min_inliers).mean()),
+            **{f"{k}_median": float(np.median(v)) for k, v in cand.items()},
+            **{f"{k}_p90": float(np.percentile(v, 90)) for k, v in cand.items()}}
     for k in ("desc_ms", "retrieval_ms", "verify_ms", "total_ms"):
         v = np.array([r[k] for r in rows])
         s[k] = {"median": float(np.median(v)), "p95": float(np.percentile(v, 95))}
