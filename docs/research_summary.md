@@ -15,8 +15,8 @@ in Isaac Sim, with controlled lighting).
 
 ## The argument (one paragraph)
 
-Single-session stereo visual SLAM already works on lunar-analogue terrain, and learned features do not
-improve it. The real problem is **map reuse under changing illumination**: reuse works under the same
+Single-session stereo visual SLAM already works on lunar-analogue terrain (3–8 cm), and learned features
+give no clear gain there. The real problem is **map reuse under changing illumination**: reuse works under the same
 lighting but fails completely (0 %) when the sun angle changes. The failure lies almost entirely in
 **place recognition** (bag-of-words retrieval), not in feature matching or pose estimation. Swapping in
 **learned global retrieval (AnyLoc/MixVPR) plus learned matching (SuperPoint + LightGlue)** recovers most
@@ -30,7 +30,7 @@ camera–LiDAR–IMU fusion with **cross-modal verification**.
 | # | Claim | Key numbers | Evidence |
 |---|---|---|---|
 | 1 | Single-session stereo SLAM is accurate on LunaPolaris | ORB-SLAM3 ATE 3–8 cm, 25 ms/frame; RTAB-Map 6–8 cm; FAST-LIO2 5–7 cm | [milestone1](results/milestone1.md), [compute_comparison](results/compute_comparison.md), [fastlio_lunapolaris](results/fastlio_lunapolaris.md) |
-| 2 | Learned features do not improve single-session tracking | SP_SLAM3 5 / 9 cm vs ORB-SLAM3 3 / 8 cm (seq01/11), 4–5× slower. LAC (SuperPoint+LightGlue+GTSAM) 0.16 m after the keyframe-VO fix; 1.2–1.8 m with ORB | [lac_lunapolaris](results/lac_lunapolaris.md) |
+| 2 | Learned features give no clear single-session gain over ORB | SP_SLAM3 as published: 5 / 9 cm vs ORB-SLAM3 3 / 8 cm (seq01/11), 4–5× slower. With the per-keypoint descriptor fix (r6, single mapping runs): 4.1 / 6.1 cm, so seq01 is still behind ORB-SLAM3 and seq11 is slightly ahead. Repeats are needed before claiming a gain. LAC (SuperPoint+LightGlue+GTSAM): 0.16 m after the keyframe-VO fix; 1.2–1.8 m with ORB | [lac_lunapolaris](results/lac_lunapolaris.md), [map_reuse](results/map_reuse.md) (r6 session-A maps) |
 | 3 | The sim agrees, for an aerial survey under four lightings | ORB-SLAM3 best in all four (0.13–0.15 m); no run lost tracking | [lunaryard_aerial_lighting](results/lunaryard_aerial_lighting.md) |
 | 4 | Map reuse works under the same lighting | 92–100 % of frames localized at the mapping run's accuracy (sim nominal→nominal/dim, seq01→seq01, seq11→seq11) | [map_reuse](results/map_reuse.md) |
 | 5 | Map reuse with stock (DBoW) place recognition fails when lighting changes | Sim low_sun/glare: 0 %, both systems and modes. Real seq01↔seq11: 0 % in both directions. seq01→seq02 (similar lighting) works | [map_reuse](results/map_reuse.md) |
