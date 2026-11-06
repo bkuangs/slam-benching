@@ -1,0 +1,67 @@
+# Map reuse on OmniLRS LargeScale (Site20), session B: SP_SLAM3 r6 learned relocalization, final configuration
+# (unit descriptors + map_anchor, LightGlue verifier, 1-frame gate); 60 m AGL, localize the query pass (survey
+# shifted by (0.2, 0.25) x leg spacing, other perturbations) under lighting 'low_sun' in the nominal map of
+# configs/omnilrs_largescale_aerial_60m_b050_spslam3_stereo_map_gd_unitdesc.yaml. Relocalize mode; poses scored in
+# session A's fixed map frame. See docs/results/largescale_trial.md "Map reuse across lighting".
+#   sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 1:00:00 --dependency=afterok:<session A job> scripts/slurm_slambench.sbatch run configs/omnilrs_lsmapreuse_60m_mapnominal_low_sun_spslam3_learnedreloc_unitdesc_anchor_gate1.yaml
+name: omnilrs_lsmapreuse_60m_mapnominal_low_sun_spslam3_learnedreloc_unitdesc_anchor_gate1
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: largescale_sweep/ls60_query_low_sun
+
+algorithm:
+  name: spslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/spslam3_9439971_r6.sif
+  settings:
+    load_map: ~/scratch/slam-bench-work/runs/omnilrs_largescale_aerial_60m_b050_spslam3_stereo_map_gd_unitdesc   # latest successful run of configs/omnilrs_largescale_aerial_60m_b050_spslam3_stereo_map_gd_unitdesc.yaml
+    reuse_mode: relocalize
+    learned_reloc: true          # MixVPR top-K retrieval + verification (patch 0007)
+    learned_reloc_topk: 5
+    learned_reloc_min_inliers: 50
+    learned_reloc_consistent_frames: 1   # 1-frame gate (accept the first verified pose)
+    learned_reloc_verifier: lightglue
+    learned_reloc_recover_descriptors: true    # no-op with sp_unit_descriptors (the descriptors are already unit-norm)
+    sp_unit_descriptors: true    # per-keypoint unit-norm SuperPoint descriptors everywhere (patch 0008);
+                                 # SPmatcher thresholds 0.52 / 1.19 and BoW scale sqrt(256/1200) follow from it
+    map_anchor: true             # map anchoring after relocalization (patch 0008): VO-only frames are re-registered to the
+                                 # 3 nearest map keyframes with LightGlue + MLPnP, accepted if the local map then tracks
+                                 # with >= 30 inliers and the correction is <= 2 m / 15 deg; log: algorithm/map_anchor.csv
+    sp_n_features: 1200          # = orb_n_features of the ORB-SLAM3 lean config
+    sp_n_levels: 1               # SuperPoint on the full-resolution image only (SP_SLAM3 recommendation)
+    # SuperPoint confidence thresholds. The SP_SLAM3 README values (0.155 / 0.055, the adapter
+    # defaults) leave ~40 keypoints per LunaPolaris frame (low-texture regolith; ~90 even at 0.005),
+    # far below the 500 that stereo initialisation needs, so tracking never starts. These thresholds
+    # fill the same 1200-keypoint budget as ORB-SLAM3 (top-1200 NMS'd heatmap maxima, spread by the
+    # oct-tree); see docs/adapter_interface.md.
+    sp_ini_th: 0.00001
+    sp_min_th: 0.000001
+    sp_fp16: false
+    lightglue: true
+    lightglue_fp16: false
+    stereo_th_depth: 200.0   # close/far split at 100 m depth (0.5 m baseline)
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 1800
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}
+  map_reuse:                     # fixed-frame scoring in session A's map (docs/evaluation.md "Map reuse")
+    error_thresholds_m: [0.1, 0.25, 0.5, 1.0]
+    false_relocalization_m: 0.5
+    false_relocalization_deg: 15.0
+    staleness_s: [1.0, 5.0]

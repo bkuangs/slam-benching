@@ -1,0 +1,39 @@
+# orbslam3 stereo on the OmniLRS LargeScale (LOLA Site20 + procedural high-res terrain) aerial trial, 60 m AGL.
+# Rendered by sim/omnilrs/largescale_trial.sbatch (job 6824611) with the non-repeating ground
+# (--terrain-shader bombed --albedo-brightness 1.0 --bright-amp 0.3): terrain-following lawnmower 60 m above the DEM,
+# 8 m/s, camera pitched 60 deg down, 15 Hz, 30 s; sun elevation 45 deg, azimuth 180. Estimator settings as in
+# configs/omnilrs_lunaryard_aerial_nominal_orbslam3_stereo.yaml. Sanity check only: at ~70 m range the 0.12 m
+# ZED2 baseline gives ~0.45 px disparity. See docs/results/largescale_trial.md.
+#   sbatch -p ice-cpu --constraint=gold6226 -c 8 --mem=32G -t 1:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs_largescale_aerial_60m_v2_orbslam3_stereo.yaml
+name: omnilrs_largescale_aerial_60m_v2_orbslam3_stereo
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: largescale_trial/ls_aerial_60m_v2
+
+algorithm:
+  name: orbslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/orbslam3_4452a3c.sif
+  settings:
+    orb_n_features: 1200
+    stereo_th_depth: 40.0
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

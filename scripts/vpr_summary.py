@@ -61,12 +61,12 @@ def sim_recall_tables(d, out):
                 f"{float(rec['bow', mp, q]['bow_shared_words_top1_median']):.0f}" for q in conds) + " |")
 
 
-def real_recall_table(d, out):
+def real_recall_table(d, out, title="Real (LunaPolaris)"):
     rows = read_csv(os.path.join(d, "recall.csv"))
     meta = json.load(open(os.path.join(d, "meta.json")))
     pairs = [tuple(p) for p in meta["pairs"]]
     rec = {(r["method"], r["map"], r["query"]): r for r in rows}
-    out.append("\n**Real (LunaPolaris) Recall@1 / @5 / @10** (%)\n")
+    out.append(f"\n**{title} Recall@1 / @5 / @10** (%)\n")
     out.append("| map → query | queries (with positive) | " + " | ".join(METHOD_NAMES[m] for m in methods_in(rows)) + " |")
     out.append("|---|---|" + "---|" * len(methods_in(rows)))
     for mp, q in pairs:
@@ -226,6 +226,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sim")
     ap.add_argument("--real")
+    ap.add_argument("--largescale", nargs="*", default=[], help="LargeScale suite result dirs (largescale60/30)")
     ap.add_argument("--out")
     a = ap.parse_args()
     out = []
@@ -237,6 +238,10 @@ def main():
         e2e_tables(a.sim, out, "sim")
     if a.real:
         e2e_tables(a.real, out, "real")
+    for d in a.largescale:
+        suite = json.load(open(os.path.join(d, "meta.json")))["suite"]
+        real_recall_table(d, out, f"OmniLRS {suite}")
+        e2e_tables(d, out, suite)
     timing_table({k: v for k, v in (("sim", a.sim), ("real", a.real)) if v}, out)
     text = "\n".join(out) + "\n"
     if a.out:

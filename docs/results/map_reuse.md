@@ -119,6 +119,10 @@ descriptor versus 32 bytes for ORB. The atlas loads in ≈10 s for ORB and ≈3.
 | SP_SLAM3 | merge | dim | 0.981 | 0.981 | 2.3 s | 0.130 m | 0.118 m | 0.221 m | 0.24° | 0.0 s | 127 |
 | SP_SLAM3 | merge | glare | **0** (init_failure) | 0.000 | – | – | – | – | – | – | 124 |
 
+The same sweep at 30 m and 60 m AGL on the real-DEM OmniLRS LargeScale terrain (non-repeating
+texture, offset query pass) is in
+[largescale_trial.md](largescale_trial.md#map-reuse-across-lighting-60-m-and-30-m-05-m-baseline).
+
 `init_failure` = never localized in the loaded map: 0 of 1800 frames. In merge mode, all four
 estimator × lighting failures still tracked all 1800 frames in their own new map, but it never
 merged, so it stays in an unknown frame.

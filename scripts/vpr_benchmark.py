@@ -47,6 +47,17 @@ SUITES = {
         "num_disp": 96,
     },
 }
+# OmniLRS LargeScale (docs/results/largescale_trial.md "Map reuse across lighting"): database = nominal mapping pass,
+# queries = the offset query pass (15-19 m from the map path) under each lighting, plus the map pass itself. Radii
+# scale with altitude: positive within 25 m (60 m AGL) / 12.5 m (30 m AGL), success within altitude / 60 (30) m.
+for _alt in (60, 30):
+    _s = [f"ls{_alt}_map"] + [f"ls{_alt}_{c}" for c in ("nominal", "low_sun", "dim", "glare")]
+    SUITES[f"largescale{_alt}"] = {
+        "sessions": _s, "pairs": [(_s[0], q) for q in _s],
+        "pos_m": 25.0 * _alt / 60, "pos_deg": 30.0, "succ_m": _alt / 60, "succ_deg": 2.0,
+        "db": {"every": 5, "offset": 0}, "q": {"every": 5, "offset": 2},
+        "num_disp": 32, "max_depth_m": 200.0,
+    }
 METHODS = ["bow", "anyloc", "mixvpr", "cosplace"]
 MIN_INLIERS = 20
 TOPN = 25
@@ -196,7 +207,7 @@ class Verifier:
     """Caches local features and database depth; verifies (map frame, query frame) with PnP RANSAC."""
 
     def __init__(self, sessions, cfg, timer, verifiers, depth_sources):
-        self.S, self.timer, self.verifiers, self.depth_sources = sessions, timer, verifiers, depth_sources
+        self.S, self.cfg, self.timer, self.verifiers, self.depth_sources = sessions, cfg, timer, verifiers, depth_sources
         self.ex = Extractors("cuda" if torch.cuda.is_available() else "cpu")
         self.feat, self.depth = {}, {}
         self.pool = ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 1)))
@@ -220,7 +231,9 @@ class Verifier:
         k = (src, s, i)
         if k not in self.depth:
             if src == "gt":
-                self.depth[k] = cv2.imread(self.S[s].depth_path(i), cv2.IMREAD_UNCHANGED)
+                d = cv2.imread(self.S[s].depth_path(i), cv2.IMREAD_UNCHANGED)
+                unit = float(self.S[s].meta.get("depth_unit_mm", 1.0))
+                self.depth[k] = d if unit == 1.0 else d.astype(np.float32) * unit
             else:
                 L, R = imread(self.S[s].left_path(i)), imread(self.S[s].right_path(i))
                 t = time.perf_counter()
@@ -230,7 +243,8 @@ class Verifier:
 
     def _pnp(self, v, src, m, i, q, j, kp_r, kp_q, mt):
         t = time.perf_counter()
-        Te, n, _ = localize(kp_r, kp_q, mt, self.depth_map(src, m, i), self.S[m].T[i], self.S[m].K)
+        Te, n, _ = localize(kp_r, kp_q, mt, self.depth_map(src, m, i), self.S[m].T[i], self.S[m].K,
+                            self.cfg.get("max_depth_m", 60.0))
         dt = time.perf_counter() - t
         et, er = pose_error(Te, self.S[q].T[j]) if Te is not None else (np.inf, np.inf)
         return (v, src), (n, et, er), dt
@@ -344,7 +358,7 @@ def main():
 
     # ---- end-to-end relocalization
     if not a.no_e2e:
-        depth_sources = ["gt", "stereo"] if a.suite == "sim" else ["stereo"]
+        depth_sources = ["stereo"] if a.suite == "real" else ["gt", "stereo"]
         ver = Verifier(sessions, cfg, timer, a.verifiers, depth_sources)
         e2e_path = os.path.join(a.out, "e2e.csv")
         fields = ["map", "query", "q_frame", "method", "verifier", "depth", "K", "status", "db_frame",

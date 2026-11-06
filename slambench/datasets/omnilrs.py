@@ -1,8 +1,9 @@
-"""OmniLRS (Isaac Sim) rendered stereo sequences (Lunalab or Lunaryard), written by sim/omnilrs/render_stereo.py.
+"""OmniLRS (Isaac Sim) rendered stereo sequences (Lunalab, Lunaryard or LargeScale), written by sim/omnilrs/render_stereo.py.
 
 Layout (one directory per rendered sequence, ``<root>/<sequence>/``):
     cam0/<ns>.png, cam1/<ns>.png   rectified BGR PNG stereo pair (rendered pinhole, zero distortion)
-    depth0/<ns>.png                left z-depth, uint16 mm (GT-only; never handed to estimators)
+    depth0/<ns>.png                left z-depth, uint16 in calib.json depth0_unit_mm (1 mm; LargeScale 10 mm; GT-only,
+                                   never handed to estimators)
     frames.csv                     timestamp_ns,left_path,right_path
     gt_cam0.tum                    exact left optical-frame pose per frame (TUM, environment world frame)
     calib.json                     intrinsics / baseline the renderer actually used

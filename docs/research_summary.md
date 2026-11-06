@@ -33,11 +33,12 @@ camera–LiDAR–IMU fusion with **cross-modal verification**.
 | 2 | Learned features give no clear single-session gain over ORB | SP_SLAM3 as published: 5 / 9 cm vs ORB-SLAM3 3 / 8 cm (seq01/11), 4–5× slower. With the per-keypoint descriptor fix (r6, single mapping runs): 4.1 / 6.1 cm, so seq01 is still behind ORB-SLAM3 and seq11 is slightly ahead. Repeats are needed before claiming a gain. LAC (SuperPoint+LightGlue+GTSAM): 0.16 m after the keyframe-VO fix; 1.2–1.8 m with ORB | [lac_lunapolaris](results/lac_lunapolaris.md), [map_reuse](results/map_reuse.md) (r6 session-A maps) |
 | 3 | The sim agrees, for an aerial survey under four lightings | ORB-SLAM3 best in all four (0.13–0.15 m); no run lost tracking | [lunaryard_aerial_lighting](results/lunaryard_aerial_lighting.md) |
 | 4 | Map reuse works under the same lighting | 92–100 % of frames localized at the mapping run's accuracy (sim nominal→nominal/dim, seq01→seq01, seq11→seq11) | [map_reuse](results/map_reuse.md) |
-| 5 | Map reuse with stock (DBoW) place recognition fails when lighting changes | Sim low_sun/glare: 0 %, both systems and modes. Real seq01↔seq11: 0 % in both directions. seq01→seq02 (similar lighting) works | [map_reuse](results/map_reuse.md) |
+| 5 | Map reuse with stock (DBoW) place recognition fails when lighting changes | Sim low_sun/glare: 0 %, both systems and modes. Same on LargeScale real-DEM terrain at 30/60 m AGL ([largescale_trial](results/largescale_trial.md)). Real seq01↔seq11: 0 % in both directions. seq01→seq02 (similar lighting) works | [map_reuse](results/map_reuse.md) |
 | 6 | Feature matching survives the lighting change; ORB does not | Cross-lighting PnP success with GT 3D: ORB 16 %, SP+NN 29 %, **SP+LightGlue 58 %**, ALIKED+LG 43 %, DISK+LG 36 % | [lunaryard_aerial_lighting](results/lunaryard_aerial_lighting.md) (cross-lighting section) |
 | 7 | Retrieval is where it breaks | Recall@1 sim nominal→low_sun: DBoW2 3 %, AnyLoc 85 %, MixVPR 56 %. Real 01→11: 3 % vs 37–39 % | [place_recognition](results/place_recognition.md) |
 | 8 | Learned retrieval + LightGlue verification fixes most of it | End to end, sim nominal→low_sun: DBoW2 15 %, learned 78–95 %, oracle 100 %. Real 01→11: 5 % vs 32–35 % (oracle 43 %). False positives ≤ 0.8 % at a 50-inlier gate. MixVPR 5 ms / 193 MB GPU per query | [place_recognition](results/place_recognition.md) |
 | 10 | Inside SP_SLAM3, learned relocalization fixes sim low_sun and partly fixes glare and real cross-day; map-anchored tracking makes the cross-day poses accurate | Relocalize mode, MixVPR top-5 + LightGlue + MLPnP, 50 inliers. r5 (3-frame gate): sim low_sun 0 → **99.9 %** localized at map accuracy; glare 0 → 69 %; real 11→01 0 → 32 % (first at 614 s), 01→11 0 → 71 % (first at 263 s); median error 0.66–0.67 m, because 93–95 % of localized cross-day frames are VO-only. r6 (patch 0008: global unit SuperPoint descriptors + LightGlue map anchoring when map matches drop): real cross-day median error **0.67 → 0.10 m** (01→11) and **0.66 → 0.17 m** (11→01), medians of 3 runs; VO-only 93–95 % → 33–42 %; sim glare 69 → **98 %**. With a 1-frame gate (r6, medians of 3): **90 %** localized on 01→11 and **93 %** on 11→01, first at 76 / 60 s, median 0.095 / 0.160 m. Same lighting stays at 99.9–100 % localized. With the default threshold, the 01→02 median error rises from 0.22 to 0.42 m; a stricter `sp_th_high` fixes that (0.10 m) but breaks cross-day tracking. **0 false relocalizations** in every run. MixVPR + stock BoW verification stays at 0 % under any lighting change. The remaining real-data limit is verification: about 1 % of correct cross-day candidates reach 50 PnP inliers | [map_reuse](results/map_reuse.md) (learned relocalization sections) |
+| 11 | 3D shape agreement rejects wrong places but recovers only part of the low-inlier cross-day candidates (offline) | Rule "≥ 50 inliers OR (≥ 8 + ICP shape check with conditioning)", thresholds tuned on a different pair. Sim (GT depth): removes 276 / 278 texture-aliased ≥ 50-inlier wrong places; gross FP of a bare 8-inlier floor 52.8 % → **0 %** on glare; the ICP pose lifts glare success 17.5 → 23.1 %. Real held-out cross-day, stereo depth: success 25.2 → 27.2 % (11→01) and 26.6 → 33.3 % (01→11), accepted correct candidates 82 → 88 % / 72 → 93 %, gross FP unchanged (≤ 0.2 %), vs 6.9–10.7 % gross FP without geometry. Full LiDAR + ICP pose: 45 / 49 % (walls). Ground-only clouds: ICP slides on the floor (refined pose worse than PnP) and need conditioning, which costs about half the correct candidates on the stereo ground crop. Sim stereo depth is too noisy for the low-relief terrain (no accepts). Offline, the 50-inlier gate already accepts 72–82 % of correct candidates, so the ceiling is +4–9 points. Stage 2 (in SP_SLAM3) not run: moderate, asymmetric gain and no space for an r7 image | [geometric_verification](results/geometric_verification.md) |
 | 9 | LiDAR–IMU alone fails silently on open terrain | Ground-only FAST-LIO2 diverges on every sequence (hundreds of km) and still reports 100 % coverage. Horizontal translation and yaw are unconstrained | [lidar_ground_only](research/lidar_ground_only.md) |
 
 Supporting work (method and diagnosis, not separate claims):
@@ -83,7 +84,15 @@ Supporting work (method and diagnosis, not separate claims):
    * The remaining limit is verification. Only ~0.3–1 % of correct cross-day candidates reach 50 PnP
      inliers, and fewer than 4 % of anchor attempts succeed. Densifying the map does not change this.
 
+   * Offline geometric verification (claim 11, [geometric_verification](results/geometric_verification.md)):
+     accepting 8–49-inlier candidates that pass an ICP shape + conditioning check raises held-out
+     cross-day success by +2 / +7 points (stereo depth) at unchanged gross FP, and removes nearly all
+     texture-aliased wrong places in the sim. It is not yet in SP_SLAM3: an r7 image needs ~3.3 GB of
+     scratch that is not available (r4 is still referenced by configs).
+
    Next steps:
+   * in SP_SLAM3, accept 15–49-inlier candidates whose stereo keypoints agree in 3D with the candidate's
+     and covisible keyframes' MapPoints (rule D of claim 11; needs scratch space for an r7 image);
    * verify against stereo-triangulated keyframe keypoints, or against map points from neighbouring
      keyframes, instead of only the keyframe's own MapPoints;
    * try an inlier gate that scales with the match count;
@@ -101,7 +110,21 @@ Supporting work (method and diagnosis, not separate claims):
    between sessions, and a non-repeating ground texture. The current texture repeats every 5 m. This barely
    affects recall or success (≤ 1.4 points for learned retrieval), but it causes most high-confidence
    (≥ 50-inlier) wrong-place false positives. The sim false-positive rates therefore need re-measuring
-   on non-repeating terrain.
+   on non-repeating terrain. A 3D shape check with GT depth rejects 276 of 278 of them (claim 11).
+   OmniLRS LargeScale (real LOLA Site20 DEM + streamed procedural terrain) now renders at 30 and 60 m AGL,
+   ([largescale_trial](results/largescale_trial.md)). Its stock regolith tiled every 2 m. The
+   `--terrain-shader bombed` material (world-space texture bombing + 5–50 m albedo noise) removes the
+   periodicity (2 m FFT peak at the noise floor) and doubles image contrast. With it, ORB-SLAM3 tracks
+   100 % at both 30 m and 60 m. At 60 m the 0.12 m ZED2 baseline (0.45 px disparity) biases scale by
+   ~20 % (ATE 11 m). A 0.5 m rendered baseline removes this: ATE 0.53 m, scale 0.99, the same quality as
+   at 30 m. **Done (lighting sweep, map reuse, VPR on it):**
+   * The texture-alias false positives are gone. Offline gross FP at ≥ 50 inliers is 0.3–2.2 %, the same
+     as the GT-nearest oracle, and SLAM has no wrong-place relocalization.
+   * DBoW still fails on low_sun and glare. SP_SLAM3 r6 localizes 59–87 % (vs 98–99.9 % on Lunaryard 5 m).
+   * New failure mode at 60 m: **silent post-relocalization divergence**. After a correct relocalization,
+     tracking stays "OK" while the error grows to 30–46 m (2 of 3 runs on low_sun and on glare). This needs
+     a consistency monitor.
+   * Remaining work: simulated LiDAR, noise/blur, heading changes.
 6. **More real lighting variety:** LunaPolaris seq04–10 and 12 (seq09 has a documented odometry loss at
    the turn toward the light).
 

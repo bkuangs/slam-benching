@@ -92,8 +92,8 @@ def pose_error(T_est, T_gt):
     return float(np.linalg.norm(T_est[:3, 3] - T_gt[:3, 3])), float(ang)
 
 
-def localize(kp_ref, kp_q, matches, depth_ref, T_ref, K):
-    """PnP from map 3D points (ref depth) to query pixels.
+def localize(kp_ref, kp_q, matches, depth_ref, T_ref, K, max_depth_m=60.0):
+    """PnP from map 3D points (ref depth, in mm) to query pixels; depths beyond max_depth_m are ignored.
 
     Returns (T_world_query or None, n_inliers, indices into `matches` of the PnP inliers)."""
     none = np.zeros(0, int)
@@ -102,7 +102,7 @@ def localize(kp_ref, kp_q, matches, depth_ref, T_ref, K):
     u = kp_ref[matches[:, 0]]
     ui = np.clip(np.round(u).astype(int), 0, [depth_ref.shape[1] - 1, depth_ref.shape[0] - 1])
     z = depth_ref[ui[:, 1], ui[:, 0]].astype(np.float64) / 1000.0
-    ok = (z > 0.1) & (z < 60.0)
+    ok = (z > 0.1) & (z < max_depth_m)
     if ok.sum() < 6:
         return None, 0, none
     rays = np.linalg.solve(K, np.c_[u[ok], np.ones(ok.sum())].T).T

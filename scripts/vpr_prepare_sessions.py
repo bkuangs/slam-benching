@@ -29,20 +29,33 @@ GT_TOPIC = "/vrpn_mocap/ZED2_camera_marker/rectified/pose"
 
 def sim_sessions(renders, out):
     for c in SIM_CONDITIONS:
-        root = os.path.join(renders, f"lunaryard_aerial_{c}")
-        t, left, _ = read_frames_csv(root)
-        gt = np.loadtxt(os.path.join(root, "gt_cam0.tum"))
-        assert len(gt) == len(left), (root, len(gt), len(left))
-        T = np.tile(np.eye(4), (len(gt), 1, 1))
-        T[:, :3, :3] = Rotation.from_quat(gt[:, 4:8]).as_matrix()
-        T[:, :3, 3] = gt[:, 1:4]
-        cal = json.load(open(os.path.join(root, "calib.json")))
-        meta = {"name": f"sim_{c}", "kind": "sim", "image_root": root, "depth_dir": os.path.join(root, "depth0"),
-                "fx": cal["fx"], "fy": cal["fy"], "cx": cal["cx"], "cy": cal["cy"], "baseline_m": cal["baseline_m"],
-                "width": cal["width"], "height": cal["height"], "lighting": c,
-                "pose_source": "gt_cam0.tum by row index (OpenCV optical cam0->world)"}
-        write_session(os.path.join(out, meta["name"]), meta, T, np.ones(len(T), bool), t)
-        print(meta["name"], len(T), "frames")
+        sim_session(os.path.join(renders, f"lunaryard_aerial_{c}"), f"sim_{c}", c, out)
+
+
+def largescale_sessions(renders, out):
+    """OmniLRS LargeScale map-reuse renders (docs/results/largescale_trial.md): the nominal mapping pass and the
+    offset query pass under each lighting. All share the local frame of --ls-start, so poses are comparable."""
+    for alt in (60, 30):
+        sim_session(os.path.join(renders, f"largescale_trial/ls_aerial_{alt}m_b050"), f"ls{alt}_map", "nominal", out)
+        for c in SIM_CONDITIONS:
+            sim_session(os.path.join(renders, f"largescale_sweep/ls{alt}_query_{c}"), f"ls{alt}_{c}", c, out)
+
+
+def sim_session(root, name, c, out):
+    t, left, _ = read_frames_csv(root)
+    gt = np.loadtxt(os.path.join(root, "gt_cam0.tum"))
+    assert len(gt) == len(left), (root, len(gt), len(left))
+    T = np.tile(np.eye(4), (len(gt), 1, 1))
+    T[:, :3, :3] = Rotation.from_quat(gt[:, 4:8]).as_matrix()
+    T[:, :3, 3] = gt[:, 1:4]
+    cal = json.load(open(os.path.join(root, "calib.json")))
+    meta = {"name": name, "kind": "sim", "image_root": root, "depth_dir": os.path.join(root, "depth0"),
+            "fx": cal["fx"], "fy": cal["fy"], "cx": cal["cx"], "cy": cal["cy"], "baseline_m": cal["baseline_m"],
+            "width": cal["width"], "height": cal["height"], "lighting": c,
+            "depth_unit_mm": cal.get("depth0_unit_mm", 1.0),
+            "pose_source": "gt_cam0.tum by row index (OpenCV optical cam0->world)"}
+    write_session(os.path.join(out, meta["name"]), meta, T, np.ones(len(T), bool), t)
+    print(meta["name"], len(T), "frames")
 
 
 def real_sessions(root, work, out):
@@ -80,7 +93,11 @@ def main():
     ap.add_argument("--work", default=os.path.expanduser("~/scratch/slam-bench-work"),
                     help="slambench work_dir (prepared inputs are cached under work/prepared)")
     ap.add_argument("--skip-real", action="store_true")
+    ap.add_argument("--largescale", action="store_true", help="write only the OmniLRS LargeScale sessions")
     a = ap.parse_args()
+    if a.largescale:
+        largescale_sessions(a.renders, a.out)
+        return
     sim_sessions(a.renders, a.out)
     if not a.skip_real:
         real_sessions(a.lunapolaris, a.work, a.out)

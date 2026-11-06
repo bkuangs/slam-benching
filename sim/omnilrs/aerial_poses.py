@@ -1,4 +1,5 @@
-"""Aerial (drone-like) lawnmower survey trajectory for the OmniLRS stereo renderer (render_stereo.py --env lunaryard).
+"""Aerial (drone-like) lawnmower survey trajectory for the OmniLRS stereo renderer (render_stereo.py --env lunaryard
+or --env largescale).
 
 Writes the same .npz as export_poses.py (timestamps_ns, T_world_cam0 = left OpenCV optical camera-to-world,
 width/height/fx/fy/cx/cy/baseline_m/source) plus per-frame extras (agl_m, yaw_deg, pitch_deg, roll_deg, leg).
@@ -8,8 +9,14 @@ flown at constant speed (constant yaw rate v/r, no instantaneous rotations). The
 of travel, pitched down by --pitch-deg; gentle smooth altitude/attitude perturbations are added. Altitude is
 --altitude-m above the DEM mean (constant apart from the perturbation); per-frame AGL is the height above the DEM
 directly below the camera. The leg count/length are chosen to fill --duration-s, and the script checks that the
-image footprint stays on the terrain. Run in the slam-benching venv:
+image footprint stays on the terrain. With --terrain-follow the altitude is instead --altitude-m above the DEM under
+the camera, low-pass filtered along the path (--follow-sigma-s), as needed over real (sloped) terrain. Run in the
+slam-benching venv:
     python sim/omnilrs/aerial_poses.py poses/lunaryard_aerial.npz --dem renders/<any lunaryard render>/dem.npy
+LargeScale (real LOLA DEM; local frame origin = the cfg's starting_position, z = absolute elevation), straight from
+the OmniLRS asset (the trajectory is centred on the local origin):
+    python sim/omnilrs/aerial_poses.py poses/ls_30m.npz --largescale-dem <OmniLRS>/assets/Terrains/SouthPole/<name> \
+        --start-xy 2800 -2200 --terrain-follow --altitude-m 30 --speed 5 --legs 2 --spacing 30 --duration-s 30
 """
 import argparse
 import json
@@ -54,6 +61,15 @@ def smooth_noise(t, amp, rng, periods=(13.0, 7.3, 4.1)):
     return amp * v / np.max(np.abs(v)) if amp > 0 else np.zeros_like(t)
 
 
+def gaussian_smooth(v, sigma):
+    """Gaussian low-pass of a 1-D series (sigma in samples), edge-padded so the ends are not pulled down."""
+    if sigma <= 0:
+        return np.asarray(v, float)
+    r = int(np.ceil(3 * sigma))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    return np.convolve(np.pad(v, r, mode="edge"), k / k.sum(), mode="valid")
+
+
 def camera_rotation(psi, pitch, roll):
     """OpenCV optical camera-to-world rotations: z along heading psi, pitched down by `pitch`, rolled by `roll`."""
     f = np.stack([np.cos(pitch) * np.cos(psi), np.cos(pitch) * np.sin(psi), -np.sin(pitch)], 1)
@@ -64,13 +80,31 @@ def camera_rotation(psi, pitch, roll):
 
 
 class Dem:
-    def __init__(self, path):
-        path = Path(path)
-        self.z = np.load(path)
-        meta = json.loads(path.with_suffix(".json").read_text())
-        self.res = float(meta["resolution_m"])
-        self.origin = np.asarray(meta.get("origin_xy_m", [0.0, 0.0]), float)
+    def __init__(self, path=None, z=None, res=None, origin=(0.0, 0.0)):
+        if path is not None:
+            path = Path(path)
+            z = np.load(path)
+            meta = json.loads(path.with_suffix(".json").read_text())
+            res, origin = meta["resolution_m"], meta.get("origin_xy_m", [0.0, 0.0])
+        self.z = np.asarray(z)
+        self.res = float(res)
+        self.origin = np.asarray(origin, float)
         self.size = np.array(self.z.shape[::-1]) * self.res   # (x extent, y extent)
+
+    @classmethod
+    def largescale(cls, dem_dir, start_xy, half_extent_m=1000.0):
+        """LR DEM of an OmniLRS LargeScale terrain (<dem_dir>/dem.npy + dem.yaml) in the local world frame."""
+        import sys
+
+        import yaml
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from largescale_dem import crop_local, lr_from_raw
+
+        info = yaml.safe_load((Path(dem_dir) / "dem.yaml").read_text())
+        res = abs(float(info["pixel_size"][0]))
+        z, origin = crop_local(lr_from_raw(np.load(Path(dem_dir) / "dem.npy")), res, start_xy, half_extent_m)
+        return cls(z=z, res=res, origin=origin)
 
     def height(self, xy):
         g = (np.atleast_2d(xy) - self.origin) / self.res
@@ -88,8 +122,15 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--dem", default=None, help="dem.npy (+ dem.json) from a render; without it the terrain is "
                     "assumed flat at z=0 with --size extent")
+    ap.add_argument("--largescale-dem", default=None, help="OmniLRS LargeScale DEM folder (dem.npy + dem.yaml) instead "
+                    "of --dem; cropped to +/- 1 km around the local origin")
+    ap.add_argument("--start-xy", type=float, nargs=2, default=(2800.0, -2200.0),
+                    help="LargeScale starting_position (global m from the DEM centre) = local origin")
     ap.add_argument("--size", type=float, default=80.0, help="terrain extent (m) when no --dem is given")
-    ap.add_argument("--altitude-m", type=float, default=5.0, help="above the DEM mean")
+    ap.add_argument("--altitude-m", type=float, default=5.0, help="above the DEM mean (or the DEM below, see "
+                    "--terrain-follow)")
+    ap.add_argument("--terrain-follow", action="store_true", help="altitude above the low-passed DEM under the camera")
+    ap.add_argument("--follow-sigma-s", type=float, default=2.0, help="terrain-follow low-pass sigma (s)")
     ap.add_argument("--speed", type=float, default=2.0, help="m/s")
     ap.add_argument("--pitch-deg", type=float, default=60.0, help="camera pitch below horizontal")
     ap.add_argument("--rate-hz", type=float, default=15.0)
@@ -100,23 +141,33 @@ def main():
     ap.add_argument("--alt-perturb-m", type=float, default=0.3)
     ap.add_argument("--att-perturb-deg", type=float, default=2.0, help="pitch/roll/yaw perturbation amplitude")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--offset-xy", type=float, nargs=2, default=(0.0, 0.0),
+                    help="shift the survey centre (m), e.g. for a map-reuse query pass over the same ground")
+    ap.add_argument("--baseline-m", type=float, default=ZED2["baseline_m"], help="stereo baseline (default ZED2)")
     ap.add_argument("--t0-ns", type=int, default=1_800_000_000_000_000_000)
     a = ap.parse_args()
 
-    dem = Dem(a.dem) if a.dem else None
+    if a.largescale_dem:
+        dem = Dem.largescale(a.largescale_dem, a.start_xy)
+        centre = np.zeros(2)
+    else:
+        dem = Dem(a.dem) if a.dem else None
     origin = dem.origin if dem else np.zeros(2)
     size = dem.size if dem else np.array([a.size, a.size])
-    centre = origin + size / 2.0
+    if not a.largescale_dem:
+        centre = origin + size / 2.0
     z_ref = float(dem.z.mean()) if dem else 0.0
 
     n = int(round(a.duration_s * a.rate_hz))
     t = np.arange(n) / a.rate_hz
     r = a.spacing / 2.0
     leg_len = (a.speed * t[-1] - (a.legs - 1) * np.pi * r) / a.legs
-    xy, psi, leg = lawnmower_xy(a.speed * t, centre, leg_len, a.spacing, a.legs)
+    xy, psi, leg = lawnmower_xy(a.speed * t, centre + np.asarray(a.offset_xy), leg_len, a.spacing, a.legs)
 
     rng = np.random.default_rng(a.seed)
     att = np.radians(a.att_perturb_deg)
+    if a.terrain_follow and dem:
+        z_ref = gaussian_smooth(dem.height(xy), a.follow_sigma_s * a.rate_hz)
     z = z_ref + a.altitude_m + smooth_noise(t, a.alt_perturb_m, rng)
     pitch = np.radians(a.pitch_deg) + smooth_noise(t, att, rng, (9.0, 5.3, 3.1))
     roll = smooth_noise(t, att, rng, (8.0, 4.7, 2.9))
@@ -144,17 +195,19 @@ def main():
     rot = Rotation.from_matrix(T[:-1, :3, :3]).inv() * Rotation.from_matrix(T[1:, :3, :3])
     wmax = np.degrees(np.max(rot.magnitude())) * a.rate_hz
     src = (f"aerial lawnmower: {a.legs} legs x {leg_len:.1f} m along +/-x, spacing {a.spacing} m, "
-           f"{a.altitude_m} m above DEM mean, {a.speed} m/s, pitch {a.pitch_deg} deg, {a.rate_hz} Hz, "
-           f"perturb +/-{a.alt_perturb_m} m / +/-{a.att_perturb_deg} deg, seed {a.seed}; "
-           f"DEM {a.dem or 'flat (none given)'}")
+           f"{a.altitude_m} m above {'low-passed DEM below' if a.terrain_follow else 'DEM mean'}, {a.speed} m/s, pitch {a.pitch_deg} deg, {a.rate_hz} Hz, "
+           f"perturb +/-{a.alt_perturb_m} m / +/-{a.att_perturb_deg} deg, seed {a.seed}, baseline {a.baseline_m} m"
+           + (f", centre offset {tuple(a.offset_xy)} m" if any(a.offset_xy) else "") + "; "
+           f"DEM {a.largescale_dem or a.dem or 'flat (none given)'}"
+           + (f" (LargeScale start {tuple(a.start_xy)})" if a.largescale_dem else ""))
     np.savez(a.out, timestamps_ns=ts, T_world_cam0=T, width=W, height=H, fx=fx, fy=fx, cx=W / 2.0, cy=H / 2.0,
-             baseline_m=ZED2["baseline_m"], source=src, agl_m=agl, yaw_deg=np.degrees(yaw),
+             baseline_m=a.baseline_m, source=src, agl_m=agl, yaw_deg=np.degrees(yaw),
              pitch_deg=np.degrees(pitch), roll_deg=np.degrees(roll), leg=leg)
     print(src)
     print(f"{n} frames over {t[-1]:.1f} s, path {np.sum(vel) / a.rate_hz:.1f} m, speed {vel.min():.2f}-"
           f"{vel.max():.2f} m/s, max rotation rate {wmax:.1f} deg/s; x {xy[:, 0].min():.1f}-{xy[:, 0].max():.1f}, "
           f"y {xy[:, 1].min():.1f}-{xy[:, 1].max():.1f}; edge distance >= {edge:.1f} m, footprint margin "
-          f"{-foot_out:.1f} m; AGL {agl.min():.2f}-{agl.max():.2f} m (mean {agl.mean():.2f}); frames on +x legs "
+          f"{-foot_out:.1f} m; max footprint distance {np.max(np.linalg.norm(hit - xy[:, None], axis=2)):.1f} m; AGL {agl.min():.2f}-{agl.max():.2f} m (mean {agl.mean():.2f}); frames on +x legs "
           f"{np.sum((leg >= 0) & (leg % 2 == 0))}, -x legs {np.sum((leg >= 0) & (leg % 2 == 1))}, turns {np.sum(leg < 0)} -> {a.out}")
 
 
