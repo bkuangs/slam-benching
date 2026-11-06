@@ -460,6 +460,9 @@ queries per pair: seq01→seq11 871, seq11→seq01 825, seq01→seq02 840, seq02
 
 ### 4. False positives
 
+A follow-up, [geometric_verification](geometric_verification.md), tests whether an ICP shape check
+lets the inlier gate drop below 50 without adding wrong places.
+
 sim: localized queries split by whether the chosen database frame is a GT positive (K=5, SP+LG; cross-session pairs pooled)
 
 | retrieval | 3D | localized % | chosen frame positive % (of localized) | success % (of localized, positive) | gross FP % (of localized, not positive) | median err of localized m / ° |
