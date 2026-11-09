@@ -21,7 +21,7 @@ Mean [min, max] over repeats: ORB-SLAM3 and SP_SLAM3 3 successful runs each, LAC
 * **RPE 1 s**: translation RPE over 1 s.
 * **Frame time**: mean per-frame tracking time.
 * **ORB-SLAM3 nominal**: 3 of 4 runs succeeded; 1 run aborted (`Sophus::SO3::exp` NaN, a known ORB-SLAM3
-  failure, also seen in `smokeroom_clahe_repeats.md`).
+  failure).
 
 | lighting | estimator | runs ok | ATE SE3 m | ATE Sim3 m | Sim3 scale | RPE 1 s m | coverage | loss events | n_maps | frame time ms |
 |---|---|---|---|---|---|---|---|---|---|---|

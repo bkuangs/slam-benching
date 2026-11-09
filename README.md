@@ -18,7 +18,6 @@ slambench/
   datasets/   base.py                 DatasetAdapter interface + offline format writers
               lunapolaris.py          ROS 2 bag adapter (rosbags, no ROS install needed)
               tumvi.py                TUM-VI (EuRoC/ASL export) adapter, used for installation checks
-              subtmrs.py              SubT-MRS folder release (SmokeRoom; MEI -> virtual pinhole, mono only)
               omnilrs.py              OmniLRS/Isaac Sim rendered stereo sequences (exact calibration + GT)
   viz/        rerun_export.py         run directory -> Rerun replay (.rrd)
               map_reuse_export.py     replay of a localization run in the saved map's fixed frame
@@ -39,7 +38,6 @@ third_party/spslam3/                  pinned container definition, headless driv
 sim/omnilrs/                          render LunaPolaris trajectories in the OmniLRS Lunalab, aerial surveys in the Lunaryard (Isaac Sim)
 configs/                              example experiment and batch configs
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
-scripts/download_subtmrs_smokeroom.sbatch  fetch SubT-MRS SmokeRoom data + calibration + GT
 scripts/compare_variants.py           repeated runs of config variants: outages, map continuity, shared-timestamp error
 scripts/lac_stereo_depth_probe.py     dump LAC's stereo keypoint matches (runs in the LAC container, GPU)
 scripts/stereo_depth_bias.py          stereo depth bias vs simulator GT depth or the LiDAR reference map
@@ -92,9 +90,6 @@ sbatch -p ice-cpu -c 8 --mem=32G -t 02:00:00 third_party/spslam3/build_container
 #    TUM-VI room1 (installation check, 1.7 GB):
 #      https://cdn3.vision.in.tum.de/tumvi/exported/euroc/512_16/dataset-room1_512_16.tar
 #      -> ~/scratch/datasets/tumvi/dataset-room1_512_16/
-#    SubT-MRS SmokeRoom (ICCV'23 SLAM Challenge, 8.6 GB; mono / mono_inertial only):
-#      sbatch scripts/download_subtmrs_smokeroom.sbatch
-#      -> ~/scratch/datasets/subtmrs/SubT_MRS_Hawkins_Smoke_Handheld/  (see docs/datasets/subtmrs.md)
 ```
 
 Large downloads were killed on PACE login nodes; run them as Slurm jobs.
@@ -113,7 +108,7 @@ slambench view <run_dir>                                          # replay file 
 
 ### Replay viewer
 `pip install -e '.[viz]'`, then `slambench view <run_dir> [--stride 2] [--no-images]` writes
-`<run_dir>/replay.rrd` (SmokeRoom, stride 2: ~110 MB, ~1.5 min). Copy it to a machine with a display
+`<run_dir>/replay.rrd`. Copy it to a machine with a display
 and open it with the **same** Rerun version: `pip install rerun-sdk==0.26.2 && rerun replay.rrd`.
 Play, pause and scrub on the `time` (seconds since the first frame) or `frame` timeline:
 * camera images (every `stride`-th frame, JPEG preview of the prepared estimator input) with the
@@ -173,7 +168,7 @@ evaluation: {alignment: se3, association_max_dt_s: 0.02, rpe: [{delta: 1.0, unit
 Preprocessing (e.g. `clahe`) is off by default and recorded when enabled; its strength is set by
 `clahe_clip_limit` (default 3.0, lower = gentler) and `clahe_tile_grid` (default 8). Every summary row
 carries the `experiment` name and the `clahe` / `clahe_clip_limit` settings, so preprocessing variants of the same estimator (e.g.
-`subtmrs_smokeroom_orbslam3_mono` vs `..._mono_clahe`) are separate, comparable entries. Loop closure is an
+`<experiment>` vs `<experiment>_clahe`) are separate, comparable entries. Loop closure is an
 explicit setting recorded in every summary row; keep it constant within a comparison.
 `playback_rate: 1.0` feeds frames at the recorded rate (estimator threads behave as online);
 `0` feeds as fast as possible.
@@ -200,7 +195,6 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
   normalized outputs, how to add a dataset or estimator.
 * `docs/evaluation.md` — association, frames, alignment, ATE/RPE, coverage, timing.
 * `docs/datasets/lunapolaris.md` — verified LunaPolaris topics, timestamps, calibration, frames.
-* `docs/datasets/subtmrs.md` — SubT-MRS SmokeRoom layout, MEI→pinhole conversion, extrinsics, GT.
 * `docs/datasets/omnilrs.md` — simulated Lunalab stereo: PACE/Isaac Sim setup, render pipeline, layout;
   aerial Lunaryard lighting sweep.
 * `docs/results/milestone1.md` — what ran, what was verified, blockers.
@@ -221,5 +215,5 @@ LAC (Stanford NAV Lab): MIT; LightGlue: Apache-2.0; SuperPoint weights: Magic Le
 licence (all fetched inside the container, not redistributed here). SP_SLAM3: GPLv3 (ORB-SLAM3
 derivative; built inside the container, only patches are kept here; its SuperPoint and LightGlue
 weights are under the licences above).
-TUM-VI: CC BY 4.0. SubT-MRS: CC BY 4.0 (AirLab, CMU). OmniLRS: BSD-3-Clause; Isaac Sim: NVIDIA licence
+TUM-VI: CC BY 4.0. OmniLRS: BSD-3-Clause; Isaac Sim: NVIDIA licence
 (container pulled from NGC, not redistributed here).

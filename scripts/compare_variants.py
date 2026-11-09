@@ -2,8 +2,8 @@
 """Compare repeated runs of two (or more) configuration variants of the same sequence.
 
     python scripts/compare_variants.py -o OUT_DIR \
-        --variant plain='~/scratch/slam-bench-work/runs/REPEATS/subtmrs_smokeroom_orbslam3_mono/*' \
-        --variant clahe='~/scratch/slam-bench-work/runs/REPEATS/subtmrs_smokeroom_orbslam3_mono_clahe/*' \
+        --variant plain='~/scratch/slam-bench-work/runs/REPEATS/<experiment>/*' \
+        --variant clahe='~/scratch/slam-bench-work/runs/REPEATS/<experiment>_clahe/*' \
         [--window 260 345] [--thresholds 0.25 0.5 1.0]
 
 Accuracy comes from the regular evaluator (same association, valid-sample rule, per-coordinate-session

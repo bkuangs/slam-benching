@@ -47,8 +47,6 @@ Supporting work (method and diagnosis, not separate claims):
   (session B is never re-aligned). See [adapter_interface](adapter_interface.md), [evaluation](evaluation.md).
 * **LAC drift diagnosis:** frame-to-frame VO drift fixed by keyframe-referenced VO (1.03 → 0.16 m); stride and
   sim tests rule out slow motion as the cause. See [lac_lunapolaris](results/lac_lunapolaris.md).
-* **SmokeRoom CLAHE repeats:** run-to-run variance is real; compare medians of repeats. See
-  [smokeroom_clahe_repeats](results/smokeroom_clahe_repeats.md).
 * **Lens flare:** no measurable flare-attributable error on seq11 yet. See
   [lens_flare_restoration](research/lens_flare_restoration.md).
 * **Videos:** trajectory replays and match visualizations (inliers/outliers) in

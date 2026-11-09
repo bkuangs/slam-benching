@@ -128,17 +128,6 @@ def test_summary_distinguishes_preprocessing_variants(tmp_path):
     assert (row["experiment"], row["clahe"], row["clahe_clip_limit"]) == ("with_clahe", "True", "1.5")
 
 
-def test_shipped_clahe_config_differs_only_in_clahe():
-    from pathlib import Path
-    cfgs = Path(__file__).resolve().parents[1] / "configs"
-    base = yaml.safe_load((cfgs / "subtmrs_smokeroom_orbslam3_mono.yaml").read_text())
-    var = yaml.safe_load((cfgs / "subtmrs_smokeroom_orbslam3_mono_clahe.yaml").read_text())
-    assert base["algorithm"]["settings"]["clahe"] is False and var["algorithm"]["settings"]["clahe"] is True
-    for c in (base, var):
-        del c["name"], c["algorithm"]["settings"]["clahe"]
-    assert base == var
-
-
 def test_timeout_is_reported(tmp_path, monkeypatch):
     import sys
     monkeypatch.setattr(FakeAlgorithm, "command",
