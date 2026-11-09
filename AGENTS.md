@@ -27,7 +27,7 @@ current argument, the evidence and the open work. Update it when a result change
 * GPU: request `--gres=gpu:v100:1` or `gpu:l40s:1` (with `-p coc-gpu -q coc-ice`). **Never bare `gpu:1`**:
   it can land on an AMD MI210. Isaac Sim (OmniLRS rendering) works only on `gpu:rtx_6000:1`.
 * Scratch quota is 300 GB and nearly full. Converted inputs go to node-local disk by default
-  (`prepared_dir: auto`, README "Setup"); only `slambench prepare` / `prepared_dir: work_dir` write
+  (`prepared_dir: auto`, docs/usage.md "Setup"); only `slambench prepare` / `prepared_dir: work_dir` write
   persistent caches to scratch. Don't launch several full LunaPolaris LiDAR conversions (~8 GB each) into
   `work_dir`.
 * Map-reuse session B depends on session A: `sbatch --dependency=afterok:<A job> ...`.
