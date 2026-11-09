@@ -9,7 +9,7 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 8:00:00
-#SBATCH -o vpr_benchmark-%j.out
+#SBATCH -o /home/hice1/%u/scratch/slam-bench-work/logs/vpr_benchmark-%j.out
 export PATH=/storage/ice1/3/6/bkuang7/install-dir/bin:$PATH
 W=/storage/ice1/3/6/bkuang7/slam-bench-work
 S=$W/containers/lac_26c3a2b.sif

@@ -9,7 +9,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
 #SBATCH --time=08:00:00
-#SBATCH --output=dl-lunapolaris-%j.out
+#SBATCH --output=/home/hice1/%u/scratch/slam-bench-work/logs/dl-lunapolaris-%j.out
 set -euo pipefail
 SEQ="${1:?usage: download_lunapolaris.sbatch sequence_XX [DEST_ROOT]}"
 DEST="${2:-$HOME/scratch/LunaPolaris}/$SEQ"

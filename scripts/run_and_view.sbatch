@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=03:00:00
-#SBATCH --output=slambench-view-%j.out
+#SBATCH --output=/home/hice1/%u/scratch/slam-bench-work/logs/slambench-view-%j.out
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 source "${SLAMBENCH_VENV:-$HOME/scratch/slam-bench-work/venv}/bin/activate"

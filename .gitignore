@@ -9,7 +9,8 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
-slambench-*.out
+# Slurm logs (the sbatch scripts write to ~/scratch/slam-bench-work/logs)
+*.out
 /.scratch/
 
 # Reference papers kept locally (copyrighted, large)

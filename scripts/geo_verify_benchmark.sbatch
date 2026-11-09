@@ -9,7 +9,7 @@
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 6:00:00
-#SBATCH -o geo_verify-%j.out
+#SBATCH -o /home/hice1/%u/scratch/slam-bench-work/logs/geo_verify-%j.out
 set -euo pipefail
 export PATH=/storage/ice1/3/6/bkuang7/install-dir/bin:$PATH
 W=/storage/ice1/3/6/bkuang7/slam-bench-work
