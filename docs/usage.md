@@ -143,6 +143,21 @@ Then run a `configs/**/*mapreuse*_{orbslam3,spslam3}_{relocalize,merge}.yaml` co
 names the mapping config's output directory, so the latest successful mapping run is used, and it
 localizes another sequence or lighting in that atlas. Submit it with
 `sbatch --dependency=afterok:<mapping job>`. Method and results: docs/results/map_reuse.md.
+`slambench view <localization run>` works for these runs too and writes the same map-reuse replay
+(same layout as RTAB-Map's, same fixed map->GT transform as the evaluator). The saved map is the
+mapping run's sparse map points (coloured by height) and keyframe path (`map_points.csv`,
+`keyframes.csv`). It also shows:
+* query poses (with `T_final_map`) coloured by fixed-frame error;
+* relocalization events. SP_SLAM3 learned relocalization (`learned_reloc.csv`) also gives the
+  verified map keyframe, its MixVPR rank and inlier count, with a line to that keyframe. Stock DBoW
+  relocalization does not log the matched keyframe;
+* accepted map anchors (`map_anchor.csv`, magenta);
+* the query camera next to the matched (else nearest) map keyframe image;
+* localized / tracking OK / VO-only state over time, and the verification inliers of each learned
+  relocalization attempt against the inlier gate, plus anchor inliers.
+
+Map keyframe images come from the mapping run's prepared input; they are missing if that input
+was node-local and is gone.
 
 ### Experiment config
 ```yaml
