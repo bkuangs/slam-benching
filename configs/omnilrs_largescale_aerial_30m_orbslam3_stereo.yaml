@@ -1,3 +1,4 @@
+# HISTORICAL: inputs deleted (v1 images of renders/largescale_trial/ls_aerial_30m), kept because docs/results/largescale_trial.md cites it.
 # orbslam3 stereo on the OmniLRS LargeScale (LOLA Site20 + procedural high-res terrain) aerial trial, 30 m AGL.
 # NOTE: the v1 images were deleted after the v2 comparison (scratch space); see the _v2 config.
 # Rendered by sim/omnilrs/largescale_trial.sbatch (job 6815226): terrain-following lawnmower 30 m above the DEM,

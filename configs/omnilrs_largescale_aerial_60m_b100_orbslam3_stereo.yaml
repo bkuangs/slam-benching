@@ -1,3 +1,4 @@
+# HISTORICAL: inputs deleted (1.0 m-baseline images of renders/largescale_trial/ls_aerial_60m_b100), kept because docs/results/largescale_trial.md cites it.
 # orbslam3 stereo on the OmniLRS LargeScale (LOLA Site20 + procedural high-res terrain) aerial trial, 60 m AGL,
 # baseline test (docs/results/largescale_trial.md). Same trajectory, sun and ground (--terrain-shader bombed
 # --albedo-brightness 1.0 --bright-amp 0.3) as the _v2 config; rendered with BASELINE=1.0 (1.0 m stereo baseline).

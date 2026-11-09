@@ -29,7 +29,8 @@ after the v2 comparison; their metadata (`calib.json`, `terrain.csv`, GT) is kep
 * **DEM:** downloaded only `Site20_final_adj_5mpp_surf` (41 MB tif) and wrote `dem.npy` (float32
   3200 × 3200, the raw raster) and `dem.yaml` (`center_coordinates` lon/lat, `pixel_size` [5, −5], `size`)
   to `OmniLRS/assets/Terrains/SouthPole/Site20_final_adj_5mpp_surf/`. This is the same output as
-  `scripts/extract_dems_override.sh`, written with rasterio, which is now in the venv. The tif was then
+  OmniLRS's `scripts/extract_dems_override.sh` (in the OmniLRS checkout, not this repo), written with
+  rasterio, which is now in the venv. The tif was then
   deleted (40 MB on disk).
 * **Renderer:** `render_stereo.py --env largescale`.
   * Start position: `--ls-start`, default (2800, −2200) m from the DEM centre.
@@ -152,7 +153,7 @@ Job **6824611** (`LOOK="--sun-azimuth 180 --sun-elevation 45 --terrain-shader bo
 1.0 --bright-amp 0.3" SUFFIX=_v2 ALTS="60 30" sbatch ... largescale_trial.sbatch`) rendered the same
 trajectories with the same sun to `ls_aerial_{30,60}m_v2/`.
 
-**Periodicity check** (session script `ls_grid.py`):
+**Periodicity check** (session script `ls_grid.py`, not in the repo):
 * 12 frames per run are orthorectified to a 0.5 m world-xy grid with GT depth and pose (range < 150 m),
   over a 32 × 32 m patch.
 * The patch is high-passed (σ 2 m) and normalized.
@@ -197,7 +198,8 @@ which is within node-to-node variation. The shader costs nothing measurable.
   the texture. The third run diverged.
 
 v2 SLAM configs: `configs/omnilrs_largescale_aerial_{30m,60m}_v2_orbslam3_stereo.yaml`. The v1 configs
-can no longer run because their images were deleted.
+can no longer run because their images were deleted; neither can the v2 ones since the later cleanup
+(see "Disk" under "Map reuse across lighting"). Such configs are marked `# HISTORICAL` at the top.
 
 ## Stereo baseline test at 60 m (and 30 m)
 
@@ -239,7 +241,7 @@ and the diverging run both go away.
     Most of the gain therefore comes from the baseline, and the 100 m split adds a bit more.
 
 **ORB-SLAM3 stereo** (3 runs each on `ice-cpu` gold6226; medians, with the range of the SE3 ATE).
-Raw ATE is the final SE3-aligned ATE. Sim3 aligns scale too (`ls_sim3.py`, Umeyama). The 1 s drift is
+Raw ATE is the final SE3-aligned ATE. Sim3 aligns scale too (session script `ls_sim3.py`, not in the repo; Umeyama). The 1 s drift is
 RPE translation over 1 s. Run ids are under
 `~/scratch/slam-bench-work/runs/omnilrs_largescale_aerial_<cfg>_orbslam3_stereo/`.
 

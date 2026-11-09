@@ -1,5 +1,10 @@
 # Milestone 1 results: ORB-SLAM3 stereo × LunaPolaris sequence_01
 
+> **Historical snapshot (2026-10-10).** The numbers below are still valid, but the status parts are
+> out of date: the test count, the "Remaining blockers" list (a LiDAR adapter, FAST-LIO2, now exists)
+> and the rejection notes reflect the repository at that date. For the current state see
+> [`research_summary.md`](../research_summary.md).
+
 Date: 2026-10-10. Host: PACE ICE `ice-cpu` nodes (8 cores, Slurm). Each run's `environment.json`
 records the framework commit. Run outputs live in `~/scratch/slam-bench-work/runs/` (outside git)
 and are aggregated in `runs/all_runs_summary.csv`.

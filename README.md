@@ -5,9 +5,9 @@ stereo+IMU, LiDAR+IMU) under challenging terrain, lighting and obscurants, inclu
 Existing estimators are reused unmodified (or with recorded minimal patches) behind adapters; this
 repository handles dataset adaptation, execution, output normalisation and evaluation.
 
-**Status (first milestone):** ORB-SLAM3 (pinned) × LunaPolaris sequence_01 runs end to end in
-stereo mode: 100 % of frames tracked and ATE RMSE 0.031 m (SE(3)). See
-`docs/results/milestone1.md` for full results and caveats.
+**Status:** current findings, evidence and open work are in `docs/research_summary.md`. The first
+milestone (ORB-SLAM3 × LunaPolaris sequence_01, stereo: 100 % of frames tracked, ATE RMSE 0.031 m) is
+recorded in `docs/results/milestone1.md` (historical snapshot).
 Stereo-inertial is implemented in the adapters but rejected for LunaPolaris until verified IMU
 noise parameters exist (see `docs/datasets/lunapolaris.md`). The estimator installation is
 verified on TUM-VI `room1`.
@@ -197,7 +197,7 @@ separately in `eval_status`. Online and final trajectories are evaluated separat
 * `docs/datasets/lunapolaris.md` — verified LunaPolaris topics, timestamps, calibration, frames.
 * `docs/datasets/omnilrs.md` — simulated Lunalab stereo: PACE/Isaac Sim setup, render pipeline, layout;
   aerial Lunaryard lighting sweep.
-* `docs/results/milestone1.md` — what ran, what was verified, blockers.
+* `docs/results/milestone1.md` — first milestone (historical snapshot): what ran, what was verified.
 * `docs/results/lac_lunapolaris.md` — LAC SLAM (SuperPoint/LightGlue + GTSAM) vs ORB-SLAM3,
   RTAB-Map and FAST-LIO2 on seq01/02/11: accuracy, resources, map quality, drift diagnosis.
 * `docs/results/lunaryard_aerial_lighting.md` — simulated drone survey over the Lunaryard under 4 lightings:

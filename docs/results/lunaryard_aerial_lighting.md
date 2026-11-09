@@ -39,7 +39,7 @@ Mean [min, max] over repeats: ORB-SLAM3 and SP_SLAM3 3 successful runs each, LAC
 | glare | lac | 1/1 | 0.691 | 0.589 | 1.019 | 0.059 | 1.00 | 0 | 1 | 68 |
 
 All 28 successful runs tracked every frame (coverage 1.00) in one map, with no tracking-loss events.
-5 s displacement ratio (estimate / GT, median; `segscale.py`):
+5 s displacement ratio (estimate / GT, median; session script `segscale.py`, not in the repo):
 
 | lighting | ORB-SLAM3 | SP_SLAM3 | LAC |
 |---|---|---|---|

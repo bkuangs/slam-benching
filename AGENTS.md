@@ -21,6 +21,7 @@ current argument, the evidence and the open work. Update it when a result change
 * One run: `sbatch [slurm opts] scripts/slurm_slambench.sbatch run configs/<name>.yaml`. Output goes to
   `~/scratch/slam-bench-work/runs/<name>/<run id>/` (`summary.csv`, `eval/metrics.json`,
   `algorithm/driver_status.json`).
+* Slurm logs from the repo's sbatch scripts go to `~/scratch/slam-bench-work/logs/` (`slambench-<job>.out` etc.).
 * CPU estimators (ORB-SLAM3, RTAB-Map, FAST-LIO2): `-p ice-cpu --constraint=gold6226`, so timing is
   comparable.
 * GPU: request `--gres=gpu:v100:1` or `gpu:l40s:1` (with `-p coc-gpu -q coc-ice`). **Never bare `gpu:1`**:
