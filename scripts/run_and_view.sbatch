@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run one experiment config, then export its replay (<run_dir>/replay.rrd).
-#   sbatch scripts/run_and_view.sbatch configs/<experiment>.yaml [extra `slambench view` args]
+#   sbatch scripts/run_and_view.sbatch configs/<subdir>/<experiment>.yaml [extra `slambench view` args]
 #SBATCH --job-name=slambench-view
 #SBATCH --partition=ice-cpu
 #SBATCH --cpus-per-task=8

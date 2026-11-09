@@ -21,7 +21,7 @@ terrain. A lunar flyer sees no walls.
   `point_filter_num` 3, 0.2 m voxels, real-time playback, same node type.
 * **Baseline.** The existing single full-scan runs from 2026-10-19. These use the same image and settings;
   the cache could not be regenerated under the scratch quota.
-* **Configs.** `configs/lunapolaris_seq{01,02,11}_fastlio_lidar_inertial_ground.yaml`,
+* **Configs.** `configs/lunapolaris/lunapolaris_seq{01,02,11}_fastlio_lidar_inertial_ground.yaml`,
   `seq{01,11}_*_ground_harsh.yaml`, `seq{01,11}_*_decim5.yaml`, `seq11_*_decim15.yaml`.
 
 ## 1. Registration conditioning per scan (`scripts/lidar_degeneracy_probe.py`, 16 scans per sequence)
@@ -142,7 +142,7 @@ python scripts/lidar_degeneracy_probe.py --seq 01 02 11 --scans 16 --plot-dir do
 for c in seq01_fastlio_lidar_inertial_ground seq02_fastlio_lidar_inertial_ground seq11_fastlio_lidar_inertial_ground \
          seq01_fastlio_lidar_inertial_ground_harsh seq11_fastlio_lidar_inertial_ground_harsh \
          seq01_fastlio_lidar_inertial_decim5 seq11_fastlio_lidar_inertial_decim5 seq11_fastlio_lidar_inertial_decim15; do
-  sbatch -p ice-cpu -c 8 --mem=32G -t 03:00:00 --constraint=gold6226 scripts/slurm_slambench.sbatch run configs/lunapolaris_$c.yaml
+  sbatch -p ice-cpu -c 8 --mem=32G -t 03:00:00 --constraint=gold6226 scripts/slurm_slambench.sbatch run configs/lunapolaris/lunapolaris_$c.yaml
 done
 python scripts/fastlio_divergence_report.py ~/scratch/slam-bench-work/runs/lunapolaris_seq*_fastlio_lidar_inertial*/<run> --window-ate 120
 ```

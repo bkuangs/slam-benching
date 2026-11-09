@@ -5,7 +5,7 @@ terrain. The camera flies at 5 m AGL and 2 m/s, pitched 60° down, along a 120 s
 smooth turns (1800 frames at 15 Hz). There are 4 lighting conditions with the same trajectory, terrain and
 rocks. Setup, reproduction and caveats: [`docs/datasets/omnilrs.md`](../datasets/omnilrs.md#aerial-lunaryard-lighting-sweep).
 Estimator settings are identical to the real LunaPolaris configs. Configs:
-`configs/omnilrs_lunaryard_aerial_<lighting>_{orbslam3_stereo,spslam3_stereo,lac_stereo_kfvo}.yaml`.
+`configs/omnilrs/lunaryard/omnilrs_lunaryard_aerial_<lighting>_{orbslam3_stereo,spslam3_stereo,lac_stereo_kfvo}.yaml`.
 
 | lighting | sun az / el, intensity | appearance | sample left image (`/storage/ice1/3/6/bkuang7/omnilrs/renders/`) |
 |---|---|---|---|

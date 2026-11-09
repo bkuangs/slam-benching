@@ -65,17 +65,17 @@ and localizes in it.
     Seq11 is darker with blown highlights, and it needs the −1.63 px right-row shift (see
     `docs/datasets/lunapolaris.md`).
 * Estimator settings are the existing lean stereo settings: ORB 1200 features, SP 1200 features,
-  loop closure on, real-time playback. The configs are `configs/*_stereo_map.yaml` (A) and
-  `configs/{omnilrs_mapreuse_mapnominal,lunapolaris_mapreuse_map01}_*_{orbslam3,spslam3}_{relocalize,merge}.yaml`
+  loop closure on, real-time playback. The configs are `configs/**/*_stereo_map.yaml` (A) and
+  `configs/**/{omnilrs_mapreuse_mapnominal,lunapolaris_mapreuse_map01}_*_{orbslam3,spslam3}_{relocalize,merge}.yaml`
   (B).
 
 ### Reproduce
 ```bash
 export PATH=/storage/ice1/3/6/bkuang7/install-dir/bin:$PATH
 # session A (ORB-SLAM3 runs on CPU; SP_SLAM3 needs a GPU: -p coc-gpu -q coc-ice --gres=gpu:v100:1)
-A=$(sbatch --parsable -p ice-cpu -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_nominal_orbslam3_stereo_map.yaml)
+A=$(sbatch --parsable -p ice-cpu -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs/lunaryard/omnilrs_lunaryard_aerial_nominal_orbslam3_stereo_map.yaml)
 # session B, after A succeeded
-sbatch -p ice-cpu -c 8 --mem=32G -t 3:00:00 --dependency=afterok:$A scripts/slurm_slambench.sbatch run configs/omnilrs_mapreuse_mapnominal_low_sun_orbslam3_relocalize.yaml
+sbatch -p ice-cpu -c 8 --mem=32G -t 3:00:00 --dependency=afterok:$A scripts/slurm_slambench.sbatch run configs/omnilrs/map_reuse/omnilrs_mapreuse_mapnominal_low_sun_orbslam3_relocalize.yaml
 ```
 Each config's header has its exact command. Results are in `runs/<config>/<run>/eval/metrics.json`
 (section `map_reuse`), `extra.map_reuse` / `extra.saved_map` in `algorithm_output.json`, and
@@ -283,7 +283,7 @@ real 01→11 queries. This section tests that pipeline inside running SP_SLAM3, 
   in the atlas as KeyFrame boost class version 1, so atlases saved earlier still load (they just
   have no descriptors). This adds 16 KB per keyframe, about 1 % of an SP atlas. Session A was
   rebuilt with image r4 and `global_descriptors: true`
-  (`configs/*_spslam3_stereo_map_gd.yaml`):
+  (`configs/**/*_spslam3_stereo_map_gd.yaml`):
 
   | map | ATE RMSE (SE3) | keyframes | map points | atlas |
   |---|---|---|---|---|
@@ -347,16 +347,16 @@ real 01→11 queries. This section tests that pipeline inside running SP_SLAM3, 
   section is relocalize mode only.
 
 Configs:
-* session A: `configs/*_spslam3_stereo_map_gd.yaml`;
-* session B: `configs/*mapreuse*_spslam3_learnedreloc_{lgfix,lg,bow}.yaml`;
+* session A: `configs/**/*_spslam3_stereo_map_gd.yaml`;
+* session B: `configs/**/*mapreuse*_spslam3_learnedreloc_{lgfix,lg,bow}.yaml`;
   * `lgfix` = LightGlue verification on recovered descriptors (r5);
   * `lg` = LightGlue on the raw descriptors (r4);
   * `bow` = SearchByBoW verification (r4; the BoW path is identical in r5);
 * `*_lgfix1f.yaml`: the gate ablation with 1 consistent frame.
 
 ```bash
-A=$(sbatch --parsable -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/lunapolaris_seq01_spslam3_stereo_map_gd.yaml)
-sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 --dependency=afterok:$A scripts/slurm_slambench.sbatch run configs/lunapolaris_mapreuse_map01_loc11_spslam3_learnedreloc_lgfix.yaml
+A=$(sbatch --parsable -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/lunapolaris/lunapolaris_seq01_spslam3_stereo_map_gd.yaml)
+sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 --dependency=afterok:$A scripts/slurm_slambench.sbatch run configs/lunapolaris/map_reuse/lunapolaris_mapreuse_map01_loc11_spslam3_learnedreloc_lgfix.yaml
 python scripts/learned_reloc_diagnostics.py ~/scratch/slam-bench-work/runs/lunapolaris_mapreuse_map01_loc11_spslam3_learnedreloc_lgfix
 ```
 
@@ -619,9 +619,9 @@ these settings on older images.
   `eval/learned_reloc_diagnostics.json`).
 
 Configs (all pin image r6):
-* session A: `configs/*_spslam3_stereo_map_gd_unitdesc.yaml` (Fix 1) and
-  `configs/lunapolaris_seq{01,11}_spslam3_stereo_map_gd_dense.yaml` (Fixes 1 + 2);
-* session B: `configs/*mapreuse*_spslam3_learnedreloc_<variant>.yaml`, where the variant is:
+* session A: `configs/**/*_spslam3_stereo_map_gd_unitdesc.yaml` (Fix 1) and
+  `configs/lunapolaris/lunapolaris_seq{01,11}_spslam3_stereo_map_gd_dense.yaml` (Fixes 1 + 2);
+* session B: `configs/**/*mapreuse*_spslam3_learnedreloc_<variant>.yaml`, where the variant is:
   * `unitdesc` = Fix 1;
   * `dense` = Fixes 1 + 2;
   * `lgfix_anchor` = Fix 3 alone, on the r4 maps;
@@ -632,8 +632,8 @@ Configs (all pin image r6):
 Run with:
 
 ```bash
-A=$(sbatch --parsable -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/lunapolaris_seq11_spslam3_stereo_map_gd_unitdesc.yaml)
-sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 --dependency=afterok:$A scripts/slurm_slambench.sbatch run configs/lunapolaris_mapreuse_map11_loc01_spslam3_learnedreloc_unitdesc_anchor.yaml
+A=$(sbatch --parsable -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 scripts/slurm_slambench.sbatch run configs/lunapolaris/lunapolaris_seq11_spslam3_stereo_map_gd_unitdesc.yaml)
+sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 --dependency=afterok:$A scripts/slurm_slambench.sbatch run configs/lunapolaris/map_reuse/lunapolaris_mapreuse_map11_loc01_spslam3_learnedreloc_unitdesc_anchor.yaml
 python scripts/learned_reloc_diagnostics.py ~/scratch/slam-bench-work/runs/lunapolaris_mapreuse_map11_loc01_spslam3_learnedreloc_unitdesc_anchor
 ```
 

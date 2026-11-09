@@ -306,14 +306,15 @@ def test_collect_saving_session_reports_map_size(tmp_path, adapter):
 
 def test_map_reuse_configs_are_consistent():
     repo = Path(__file__).resolve().parents[1]
-    cfgs = [(p, yaml.safe_load(p.read_text())) for p in sorted(repo.glob("configs/*mapreuse*.yaml"))]
+    by_name = {p.stem: p for p in repo.glob("configs/**/*.yaml")}
+    cfgs = [(p, yaml.safe_load(p.read_text())) for p in sorted(repo.glob("configs/**/*mapreuse*.yaml"))]
     cfgs = [(p, c) for p, c in cfgs if c["algorithm"]["name"] in ("orbslam3", "spslam3")]
     assert cfgs
     for p, c in cfgs:
         s = c["algorithm"]["settings"]
         assert s["reuse_mode"] in mr.REUSE_MODES and "load_map" in s, p.name
         name = Path(s["load_map"]).name
-        mapcfg = yaml.safe_load((repo / "configs" / f"{name}.yaml").read_text())
+        mapcfg = yaml.safe_load(by_name[name].read_text())
         ms = mapcfg["algorithm"]["settings"]
         assert ms["save_map"] is True and mapcfg["algorithm"]["name"] == c["algorithm"]["name"], p.name
         diff = {k for k in set(ms) | set(s) if k not in mr._FREE_SETTINGS and ms.get(k) != s.get(k)}

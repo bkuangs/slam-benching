@@ -4,7 +4,7 @@ defaults:
   output_root: ~/scratch/slam-bench-work/runs
   work_dir: ~/scratch/slam-bench-work
 experiments:
-  - lunapolaris_seq01_orbslam3_stereo_inertial.yaml   # no verified IMU noise model in LunaPolaris
+  - lunapolaris/lunapolaris_seq01_orbslam3_stereo_inertial.yaml   # no verified IMU noise model in LunaPolaris
   - name: lunapolaris_seq01_orbslam3_lidar_inertial     # ORB-SLAM3 has no LiDAR mode
     dataset: {name: lunapolaris, root: ~/scratch/LunaPolaris, sequence: sequence_01}
     algorithm: {name: orbslam3, mode: lidar_inertial}

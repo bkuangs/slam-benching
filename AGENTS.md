@@ -18,7 +18,7 @@ current argument, the evidence and the open work. Update it when a result change
 
 ## Running experiments
 
-* One run: `sbatch [slurm opts] scripts/slurm_slambench.sbatch run configs/<name>.yaml`. Output goes to
+* One run: `sbatch [slurm opts] scripts/slurm_slambench.sbatch run configs/<subdir>/<name>.yaml`. Output goes to
   `~/scratch/slam-bench-work/runs/<name>/<run id>/` (`summary.csv`, `eval/metrics.json`,
   `algorithm/driver_status.json`).
 * Slurm logs from the repo's sbatch scripts go to `~/scratch/slam-bench-work/logs/` (`slambench-<job>.out` etc.).
@@ -53,6 +53,6 @@ current argument, the evidence and the open work. Update it when a result change
 
 ## Conventions
 
-* Every experiment is a YAML in `configs/`; result pages in `docs/results/` cite their configs and run ids.
+* Every experiment is a YAML under `configs/` (layout in [`configs/README.md`](configs/README.md)); result pages in `docs/results/` cite their configs and run ids.
 * Datasets, prepared inputs, run outputs and `*.sif` images never go in git.
 * On LunaPolaris, compare **translation** error. Rotation error carries a constant ~4.2° GT extrinsic offset.

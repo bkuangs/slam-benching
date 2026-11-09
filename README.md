@@ -36,7 +36,10 @@ third_party/fastlio/                  pinned container definition, offline-input
 third_party/lac/                      pinned container definition, offline Python driver for the LAC stack
 third_party/spslam3/                  pinned container definition, headless driver (port of ORB-SLAM3's), patches
 sim/omnilrs/                          render LunaPolaris trajectories in the OmniLRS Lunalab, aerial surveys in the Lunaryard (Isaac Sim)
-configs/                              example experiment and batch configs
+configs/                              one YAML per experiment (layout: configs/README.md); batch files at top level
+  lunapolaris/, lunapolaris/map_reuse/ real LunaPolaris runs; map-reuse session B
+  omnilrs/{lunalab,lunaryard,largescale,map_reuse}/  simulated runs by OmniLRS environment; session B
+  tumvi/                              estimator installation check
 scripts/slurm_slambench.sbatch        run any slambench command on a PACE compute node
 scripts/compare_variants.py           repeated runs of config variants: outages, map continuity, shared-timestamp error
 scripts/lac_stereo_depth_probe.py     dump LAC's stereo keypoint matches (runs in the LAC container, GPU)
@@ -96,9 +99,9 @@ Large downloads were killed on PACE login nodes; run them as Slurm jobs.
 
 ## Running
 ```bash
-slambench inspect configs/lunapolaris_seq01_orbslam3_stereo.yaml   # streams, calibration, per-mode compatibility
+slambench inspect configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo.yaml   # streams, calibration, per-mode compatibility
 sbatch -c 8 --mem=32G -t 03:00:00 scripts/slurm_slambench.sbatch \
-       run configs/lunapolaris_seq01_orbslam3_stereo.yaml           # convert (cached), run, evaluate
+       run configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo.yaml           # convert (cached), run, evaluate
 sbatch scripts/slurm_slambench.sbatch batch configs/batch_example.yaml   # several configs + summary CSV
 sbatch scripts/slurm_slambench.sbatch batch configs/rejection_examples.yaml  # incompatible configs -> config_rejected
 slambench evaluate <run_dir> --set evaluation.alignment=sim3      # re-evaluate with other settings
@@ -132,8 +135,8 @@ session scale estimate as the trajectory.
 Any config value can be overridden: `--set algorithm.settings.loop_closure=false`.
 
 ### Map reuse (RTAB-Map)
-Run a mapping config (e.g. `configs/lunapolaris_seq01_rtabmap_stereo.yaml`), put its run directory
-into a `configs/lunapolaris_mapreuse_*` config as `algorithm.settings.map_run`, then run that config:
+Run a mapping config (e.g. `configs/lunapolaris/lunapolaris_seq01_rtabmap_stereo.yaml`), put its run directory
+into a `configs/lunapolaris/map_reuse/lunapolaris_mapreuse_*` config as `algorithm.settings.map_run`, then run that config:
 it localizes another sequence against a copy of the saved map in a fresh process and scores it in
 the map's fixed frame (`map_reuse` in `eval/metrics.json`; see docs/evaluation.md).
 `slambench view <localization run>` writes a map-reuse replay instead of the aligned one: the saved
@@ -144,8 +147,8 @@ query camera next to the map image it should recognize (the matched node, else t
 its true pose and viewing direction), and fixed-frame error / localized state over time.
 
 ### Map reuse (ORB-SLAM3, SP_SLAM3)
-Run a mapping config with `save_map: true` (e.g. `configs/lunapolaris_seq01_orbslam3_stereo_map.yaml`).
-Then run a `configs/*mapreuse*_{orbslam3,spslam3}_{relocalize,merge}.yaml` config. Its `load_map`
+Run a mapping config with `save_map: true` (e.g. `configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo_map.yaml`).
+Then run a `configs/**/*mapreuse*_{orbslam3,spslam3}_{relocalize,merge}.yaml` config. Its `load_map`
 names the mapping config's output directory, so the latest successful mapping run is used, and it
 localizes another sequence or lighting in that atlas. Submit it with
 `sbatch --dependency=afterok:<mapping job>`. Method and results: docs/results/map_reuse.md.

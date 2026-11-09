@@ -1,6 +1,6 @@
 # Compute cost: ORB-SLAM3 vs RTAB-Map stereo (LunaPolaris)
 
-Configs: `configs/lunapolaris_seq{01,02,11}_{orbslam3,rtabmap}_stereo_lean.yaml`, 3 repeats each,
+Configs: `configs/lunapolaris/lunapolaris_seq{01,02,11}_{orbslam3,rtabmap}_stereo_lean.yaml`, 3 repeats each,
 Slurm `--constraint=gold6226` (Xeon Gold 6226, 8 cores per job), `playback_rate: 1.0`.
 
 ## What was made comparable
@@ -47,7 +47,7 @@ difference is not the descriptor type.
   to 68–75 ms; dropping grids/export cut its total CPU by ~5–10%.
 
 ## Cost of RTAB-Map's dense map
-`configs/lunapolaris_seq{01,02,11}_rtabmap_stereo_dense.yaml` are the lean RTAB-Map configs with
+`configs/lunapolaris/lunapolaris_seq{01,02,11}_rtabmap_stereo_dense.yaml` are the lean RTAB-Map configs with
 per-node 3D occupancy grids (0.05 m cells, 5 m range, from stereo depth) and the post-run dense cloud
 + OctoMap export switched back on. 3 repeats each; means over all 9 runs per variant:
 

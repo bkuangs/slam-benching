@@ -4,7 +4,7 @@ FAST-LIO2 (`fastlio` adapter, `lidar_inertial` mode: Livox HAP + ZED2 IMU) compa
 baselines ORB-SLAM3 and RTAB-Map (`*_stereo_lean`, median of 3 repeats). FAST-LIO is a **single run**
 per sequence. All runs used the same node type (Xeon Gold 6226, 8 CPUs, 32 GB).
 
-Configs: `configs/lunapolaris_seq{01,02,11}_fastlio_lidar_inertial.yaml`.
+Configs: `configs/lunapolaris/lunapolaris_seq{01,02,11}_fastlio_lidar_inertial.yaml`.
 
 ## Trajectory accuracy and robustness
 

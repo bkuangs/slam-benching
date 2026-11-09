@@ -177,14 +177,14 @@ All new settings default to off or to upstream values.
 ## Configs and run ids (final configuration)
 Run outputs are under `~/scratch/slam-bench-work/runs/<config>/<run id>/`.
 
-* **Session A maps (r6, Fix 1):** `configs/*_spslam3_stereo_map_gd_unitdesc.yaml`. Run ids: seq01
+* **Session A maps (r6, Fix 1):** `configs/**/*_spslam3_stereo_map_gd_unitdesc.yaml`. Run ids: seq01
   `20261103-212024_75a05a`, seq11 `20261103-212024_f5cc77`, sim `20261103-212024_2c9e19`.
-* **Fixes 1 + 3:** `configs/*mapreuse*_spslam3_learnedreloc_unitdesc_anchor.yaml`.
+* **Fixes 1 + 3:** `configs/**/*mapreuse*_spslam3_learnedreloc_unitdesc_anchor.yaml`.
   * 01 → 11: `20261103-221533_c89af4`, `20261103-221605_ec56d8`, `20261103-222234_0a8e27`
   * 11 → 01: `20261103-221303_b7f52a`, `20261103-221633_d4bb83`, `20261103-223818_429652`
   * sim: nominal `20261103-212903_4e1ca5`, low_sun `20261103-212903_294d83`, glare
     `20261103-213627_85d396`
-* **Fixes 1 + 3, 1-frame gate:** `configs/lunapolaris_mapreuse_map{01_loc11,11_loc01}_spslam3_learnedreloc_unitdesc_anchor_gate1.yaml`.
+* **Fixes 1 + 3, 1-frame gate:** `configs/lunapolaris/map_reuse/lunapolaris_mapreuse_map{01_loc11,11_loc01}_spslam3_learnedreloc_unitdesc_anchor_gate1.yaml`.
   * 01 → 11: `20261103-224640_d00e6b`, `20261104-000332_fdb285`, `20261104-000928_d84ef5`
   * 11 → 01: `20261103-224709_08a38e`, `20261104-000556_816721`, `20261104-001630_b90b34`
 * **Per-attempt diagnostics:** `python scripts/learned_reloc_diagnostics.py <run or config dir>`.

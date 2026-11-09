@@ -1,0 +1,38 @@
+# FAST-LIO2 on LunaPolaris sequence_11 with ground-only LiDAR: returns more than 0.3 m above the rover's
+# ground plane (leo01/base_footprint) or more than 2.5 m away horizontally are dropped at preparation
+# (/tf_static only, no ground truth). This removes the LunaLab walls, which otherwise constrain registration,
+# to test LiDAR-inertial odometry on open terrain. Otherwise identical to
+# configs/lunapolaris/lunapolaris_seq11_fastlio_lidar_inertial.yaml. See docs/research/lidar_ground_only.md.
+name: lunapolaris_seq11_fastlio_lidar_inertial_ground_harsh
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: lunapolaris
+  root: ~/scratch/LunaPolaris
+  sequence: sequence_11
+  options:
+    gt_topic: /vrpn_mocap/ZED2_camera_marker/rectified/pose
+    lidar_imu_source: zed2
+    lidar_crop_max_height_m: 0.3
+    lidar_crop_max_range_m: 2.5
+
+algorithm:
+  name: fastlio
+  mode: lidar_inertial
+  options:
+    container: ~/scratch/slam-bench-work/containers/fastlio_7cc4175.sif
+  settings:
+    playback_rate: 1.0
+    map_voxel: 0.02
+
+execution:
+  timeout_s: 3600
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

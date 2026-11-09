@@ -3,7 +3,7 @@
 Source: Zenodo, one record per sequence (sequence_01 = record 15737938; calibration images =
 record 16728838). Licence CC BY 4.0, "© 2025 University of Luxembourg — Database by Dave van der
 Meer, SnT – SpaceR". Everything below was read from `sequence_01` itself on 2026-10-10
-(`slambench inspect configs/lunapolaris_seq01_orbslam3_stereo.yaml` reproduces most of it).
+(`slambench inspect configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo.yaml` reproduces most of it).
 
 ## Container format
 ROS 2 bag, sqlite3 storage, CDR serialization (`sequence_XX/metadata.yaml` + `sequence_XX.db3`).

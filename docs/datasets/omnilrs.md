@@ -21,12 +21,12 @@ Calibration and GT are exact by construction.
 ## Pipeline
 ```bash
 # 1. GT camera poses at the real frame times + ZED2 calibration (slambench venv)
-python sim/omnilrs/export_poses.py configs/lunapolaris_seq01_orbslam3_stereo.yaml poses/seq01_60s.npz --max-s 60
+python sim/omnilrs/export_poses.py configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo.yaml poses/seq01_60s.npz --max-s 60
 # 2. Render (RTX 6000 node, ~0.42 s per stereo frame + ~90 s scene setup)
 sbatch -p coc-gpu -q coc-ice --gres=gpu:rtx_6000:1 sim/omnilrs/render.sbatch poses/seq01_60s.npz \
        renders/seq01_60s_norocks --rocks 0
 # 3. Run any stereo estimator on it
-sbatch -c 8 --mem=32G -t 01:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs_seq01_60s_orbslam3_stereo.yaml
+sbatch -c 8 --mem=32G -t 01:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs/lunalab/omnilrs_seq01_60s_orbslam3_stereo.yaml
 ```
 `render_stereo.py` options: `--terrain` (`Terrain_lidar01`/`Terrain_lidar02`, LiDAR scans of the real lab floor,
 1 cm grid), `--rocks N` (OmniLRS rock instancer; 0 disables), `--projector on|off`, `--projector-pos x y z`,
@@ -66,7 +66,7 @@ ORB-SLAM3 stereo (same settings as the real runs), SE(3)-aligned over the same 6
 The simulated floor is smoother and brighter than the real gravel (fewer, weaker corners), which is the most
 visible sim-to-real difference so far.
 
-LAC on the same replay (`configs/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`, CUDA GPU) matches ORB-SLAM3
+LAC on the same replay (`configs/omnilrs/lunalab/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`, CUDA GPU) matches ORB-SLAM3
 in simulation (kfvo: 0.012 m, ratio 0.987) but not on the real recording (0.025 m, 0.953). `depth0/` serves as
 the exact reference for `scripts/stereo_depth_bias.py --gt-depth`. See `docs/results/lac_lunapolaris.md`.
 
@@ -82,10 +82,10 @@ features (SP_SLAM3: SuperPoint + LightGlue) beat ORB under harsh lighting and fa
 sbatch -p coc-gpu -q coc-ice --gres=gpu:rtx_6000:1 sim/omnilrs/lunaryard_aerial.sbatch      # STAGES="dem poses preview full"
 # 12 estimator runs (ORB-SLAM3 on ice-cpu; SP_SLAM3 / LAC need a CUDA GPU)
 for c in nominal low_sun dim glare; do
-  sbatch scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_${c}_orbslam3_stereo.yaml
+  sbatch scripts/slurm_slambench.sbatch run configs/omnilrs/lunaryard/omnilrs_lunaryard_aerial_${c}_orbslam3_stereo.yaml
   for e in spslam3_stereo lac_stereo_kfvo; do
     sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 3:00:00 \
-           scripts/slurm_slambench.sbatch run configs/omnilrs_lunaryard_aerial_${c}_${e}.yaml
+           scripts/slurm_slambench.sbatch run configs/omnilrs/lunaryard/omnilrs_lunaryard_aerial_${c}_${e}.yaml
   done
 done
 ```

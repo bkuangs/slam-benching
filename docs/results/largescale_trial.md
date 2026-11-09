@@ -104,8 +104,8 @@ This is still about 2× slower per frame than Lunaryard, which needs no terrain 
 
 | config | run | tracked | maps | final ATE RMSE (SE3) | RPE 1 s |
 |---|---|---|---|---|---|
-| `configs/omnilrs_largescale_aerial_30m_orbslam3_stereo.yaml` | 20261104-181118_b0001b | 100 % | 1 | 0.52 m (max 1.20) on 150 m | 0.25 m |
-| `configs/omnilrs_largescale_aerial_60m_orbslam3_stereo.yaml` | 20261104-181509_7c11db | 89 % (2 losses) | 2 | 23.9 m (max 40.3) on 241 m | 8.1 m |
+| `configs/omnilrs/largescale/omnilrs_largescale_aerial_30m_orbslam3_stereo.yaml` | 20261104-181118_b0001b | 100 % | 1 | 0.52 m (max 1.20) on 150 m | 0.25 m |
+| `configs/omnilrs/largescale/omnilrs_largescale_aerial_60m_orbslam3_stereo.yaml` | 20261104-181509_7c11db | 89 % (2 losses) | 2 | 23.9 m (max 40.3) on 241 m | 8.1 m |
 
 These are the first runs; the repeats are in the v2 table.
 
@@ -197,7 +197,7 @@ which is within node-to-node variation. The shader costs nothing measurable.
   but stereo scale is 0.79. With ~0.45 px disparity, the stereo depth bias is the remaining error, not
   the texture. The third run diverged.
 
-v2 SLAM configs: `configs/omnilrs_largescale_aerial_{30m,60m}_v2_orbslam3_stereo.yaml`. The v1 configs
+v2 SLAM configs: `configs/omnilrs/largescale/omnilrs_largescale_aerial_{30m,60m}_v2_orbslam3_stereo.yaml`. The v1 configs
 can no longer run because their images were deleted; neither can the v2 ones since the later cleanup
 (see "Disk" under "Map reuse across lighting"). Such configs are marked `# HISTORICAL` at the top.
 
@@ -270,7 +270,7 @@ RPE translation over 1 s. Run ids are under
 **Disk:** the three new renders take 895 MB (292–302 MB each). The v2 0.12 m renders are kept as the
 reference.
 
-**Configs:** `configs/omnilrs_largescale_aerial_{60m_b050,60m_b100,30m_b050}_orbslam3_stereo.yaml`, plus
+**Configs:** `configs/omnilrs/largescale/omnilrs_largescale_aerial_{60m_b050,60m_b100,30m_b050}_orbslam3_stereo.yaml`, plus
 the controls `..._60m_b012_th100m_...` and `..._60m_b050_th40_...`.
 
 **Preview:** `ls60b_stereo.png` (session files) shows left and right images for frame 200 at each
@@ -517,9 +517,9 @@ gate, single run).
   viewpoint change, and r6 ≥ 0.92 within 0.5 m on nominal and dim.
 
 **Configs:**
-* Session A: `configs/omnilrs_largescale_aerial_{60,30}m_b050_{orbslam3_stereo_map,spslam3_stereo_map,spslam3_stereo_map_gd_unitdesc}.yaml`.
+* Session A: `configs/omnilrs/largescale/omnilrs_largescale_aerial_{60,30}m_b050_{orbslam3_stereo_map,spslam3_stereo_map,spslam3_stereo_map_gd_unitdesc}.yaml`.
 * Session B:
-  `configs/omnilrs_lsmapreuse_{60,30}m_mapnominal_{same,nominal,low_sun,dim,glare}_{orbslam3_relocalize,spslam3_relocalize,spslam3_learnedreloc_unitdesc_anchor_gate1}.yaml`.
+  `configs/omnilrs/map_reuse/omnilrs_lsmapreuse_{60,30}m_mapnominal_{same,nominal,low_sun,dim,glare}_{orbslam3_relocalize,spslam3_relocalize,spslam3_learnedreloc_unitdesc_anchor_gate1}.yaml`.
 
 **Jobs:**
 * Renders 6842727 and 6842728.

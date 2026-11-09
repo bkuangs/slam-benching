@@ -222,8 +222,8 @@ def test_orbslam3_settings_unchanged_by_shared_code(tmp_path):
 
 @pytest.mark.parametrize("seq", ["01", "11"])
 def test_configs_match_orbslam3_lean_baselines(seq):
-    sp_cfg = yaml.safe_load((REPO / f"configs/lunapolaris_seq{seq}_spslam3_stereo.yaml").read_text())
-    orb = yaml.safe_load((REPO / f"configs/lunapolaris_seq{seq}_orbslam3_stereo_lean.yaml").read_text())
+    sp_cfg = yaml.safe_load((REPO / f"configs/lunapolaris/lunapolaris_seq{seq}_spslam3_stereo.yaml").read_text())
+    orb = yaml.safe_load((REPO / f"configs/lunapolaris/lunapolaris_seq{seq}_orbslam3_stereo_lean.yaml").read_text())
     for k in ("dataset", "evaluation", "execution", "output_root", "work_dir"):
         assert sp_cfg[k] == orb[k], k
     assert sp_cfg["algorithm"]["name"] == "spslam3" and sp_cfg["algorithm"]["mode"] == "stereo"

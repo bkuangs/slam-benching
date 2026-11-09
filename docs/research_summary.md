@@ -145,7 +145,7 @@ the sim GT mesh/depth, or mocap.
 | What | Where |
 |---|---|
 | Framework (adapters, evaluation, runner) | `slambench/` |
-| Run configs (one YAML per experiment) | `configs/` (`lunapolaris_*`, `omnilrs_*`, `lunapolaris_mapreuse_*`) |
+| Run configs (one YAML per experiment) | `configs/{lunapolaris,omnilrs,tumvi}/`, map-reuse session B in `*/map_reuse/` (see [`configs/README.md`](../configs/README.md)) |
 | Estimator builds and patches | `third_party/{orbslam3,spslam3,rtabmap,fastlio,lac}/` |
 | Simulation (render, aerial poses, cross-lighting relocalization, videos) | `sim/omnilrs/` |
 | Place recognition | `vpr/`, `scripts/vpr_*.py`, `scripts/vpr_benchmark.sbatch` |

@@ -8,7 +8,7 @@ The comparison numbers are from `docs/results/fastlio_lunapolaris.md`.
 
 There are two LAC variants, and each is a **single run** per sequence:
 
-- **LAC-faithful** (`configs/lunapolaris_seq{01,02,11}_lac_stereo.yaml`): LAC's frontend and backend
+- **LAC-faithful** (`configs/lunapolaris/lunapolaris_seq{01,02,11}_lac_stereo.yaml`): LAC's frontend and backend
   as published, with the deviations listed under [Caveats](#caveats).
 - **LAC-kfvo** (`*_lac_stereo_kfvo.yaml`): the same, except `vo_reference: keyframe`. It was
   designed and checked on seq01 only, so seq02 and seq11 are held out (see
@@ -121,7 +121,7 @@ larger). seq01, full sequence, single runs:
 A larger stride removes the faithful variant's extra shrinkage, as the cause above predicts. Both
 variants then level off at about 0.955, so per-frame motion does not explain the remaining bias.
 
-**Simulation** (`configs/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`; see `docs/datasets/omnilrs.md`).
+**Simulation** (`configs/omnilrs/lunalab/omnilrs_seq01_60s_lac_stereo{,_kfvo}.yaml`; see `docs/datasets/omnilrs.md`).
 These runs replay the first 60 s of seq01 in the OmniLRS Lunalab, with exact calibration and ground truth.
 SE(3)-aligned over the same 60 s, using the end-displacement ratio:
 

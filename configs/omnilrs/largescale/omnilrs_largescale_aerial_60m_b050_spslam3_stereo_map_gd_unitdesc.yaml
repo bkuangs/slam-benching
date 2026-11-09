@@ -1,0 +1,53 @@
+# Map reuse on OmniLRS LargeScale (Site20), session A: SP_SLAM3 (image r6: unit descriptors + MixVPR global
+# descriptors, for learned relocalization) maps the 60 m AGL survey (0.5 m stereo baseline, v2 ground shader,
+# nominal sun az 180 / el 45) and saves the atlas. Settings as
+# configs/omnilrs/lunaryard/omnilrs_lunaryard_aerial_nominal_spslam3_stereo_map_gd_unitdesc.yaml except Stereo.ThDepth (100 m /
+# baseline). See docs/results/largescale_trial.md "Map reuse across lighting".
+#   sbatch -p coc-gpu -q coc-ice --gres=gpu:v100:1 -c 8 --mem=32G -t 1:00:00 scripts/slurm_slambench.sbatch run configs/omnilrs/largescale/omnilrs_largescale_aerial_60m_b050_spslam3_stereo_map_gd_unitdesc.yaml
+name: omnilrs_largescale_aerial_60m_b050_spslam3_stereo_map_gd_unitdesc
+output_root: ~/scratch/slam-bench-work/runs
+work_dir: ~/scratch/slam-bench-work
+
+dataset:
+  name: omnilrs
+  root: /storage/ice1/3/6/bkuang7/omnilrs/renders   # contains <sequence>/{cam0,cam1,frames.csv,gt_cam0.tum,calib.json}
+  sequence: largescale_trial/ls_aerial_60m_b050
+
+algorithm:
+  name: spslam3
+  mode: stereo
+  options:
+    container: ~/scratch/slam-bench-work/containers/spslam3_9439971_r6.sif
+  settings:
+    save_map: true                # session A: atlas -> algorithm/atlas.osa
+    global_descriptors: true      # MixVPR descriptor per keyframe, saved in the atlas (learned relocalization)
+    sp_unit_descriptors: true    # per-keypoint unit-norm SuperPoint descriptors everywhere (patch 0008);
+                                 # SPmatcher thresholds 0.52 / 1.19 and BoW scale sqrt(256/1200) follow from it
+    sp_n_features: 1200          # = orb_n_features of the ORB-SLAM3 lean config
+    sp_n_levels: 1               # SuperPoint on the full-resolution image only (SP_SLAM3 recommendation)
+    # SuperPoint confidence thresholds. The SP_SLAM3 README values (0.155 / 0.055, the adapter
+    # defaults) leave ~40 keypoints per LunaPolaris frame (low-texture regolith; ~90 even at 0.005),
+    # far below the 500 that stereo initialisation needs, so tracking never starts. These thresholds
+    # fill the same 1200-keypoint budget as ORB-SLAM3 (top-1200 NMS'd heatmap maxima, spread by the
+    # oct-tree); see docs/adapter_interface.md.
+    sp_ini_th: 0.00001
+    sp_min_th: 0.000001
+    sp_fp16: false
+    lightglue: true
+    lightglue_fp16: false
+    stereo_th_depth: 200.0   # close/far split at 100 m depth (0.5 m baseline)
+    loop_closure: true
+    clahe: false
+    playback_rate: 1.0
+    log_features: false
+
+execution:
+  timeout_s: 1800
+
+evaluation:
+  alignment: se3
+  association_max_dt_s: 0.02     # GT is exactly at frame times
+  segment_max_gap_s: 0.5
+  rpe:
+    - {delta: 1.0, unit: m}
+    - {delta: 1.0, unit: s}

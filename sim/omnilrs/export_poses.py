@@ -3,7 +3,7 @@
 Writes an .npz with the real left-camera frame timestamps (restricted to GT coverage), the GT left-camera
 (OpenCV optical frame) poses interpolated at those timestamps, and the ZED2 rectified stereo calibration.
 Run in the slam-benching venv:
-    python sim/omnilrs/export_poses.py configs/lunapolaris_seq01_orbslam3_stereo.yaml poses.npz [--max-s 60]
+    python sim/omnilrs/export_poses.py configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo.yaml poses.npz [--max-s 60]
 """
 import argparse
 from pathlib import Path

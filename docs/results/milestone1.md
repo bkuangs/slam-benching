@@ -40,7 +40,7 @@ Two failures were found and fixed during verification. Both stay in the summary 
   conversion. The driver now rejects non-8-bit input.
 
 ## 2. First pairing: LunaPolaris sequence_01, stereo (run `20261010-160107_35bc03`)
-Config: `configs/lunapolaris_seq01_orbslam3_stereo.yaml` (1200 ORB features, loop closure on,
+Config: `configs/lunapolaris/lunapolaris_seq01_orbslam3_stereo.yaml` (1200 ORB features, loop closure on,
 real-time playback, no preprocessing). Input: 13 194 stereo pairs, after dropping 3 left-only and
 39 right-only frames. Calibration comes from the bag's `camera_info` (fx 263.27, baseline 0.11983 m).
 
