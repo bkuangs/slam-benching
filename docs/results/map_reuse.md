@@ -778,6 +778,31 @@ Run ids (`runs/<config>/<run id>`):
 * The dev rows are not on scratch, and are not kept in the repository. Their session-A atlases
   (0.5–2.0 GB each) were deleted to stay within the storage limits.
 
+#### seq11 → seq02 (cross-lighting, second query)
+
+Same setup as 11 → 01, with seq02 as the query. Same maps (SP_SLAM3 r6 seq11 `20261103-212024_f5cc77`,
+ORB-SLAM3 seq11 `20261028-081435_533c3c`), 3 runs each, per-column median [range]. seq02 was recorded
+in the same lighting as seq01, so this is a second cross-lighting pair. seq11 is the darker
+low-spotlight sequence.
+
+| system | localized | ≤0.5 m | first loc | median | RMSE | p90 | p95 | false / events | VO-only | ms/frame | gate pass on positives | anchors |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **SP_SLAM3 r6, 1-frame gate** | **0.922** [0.915–0.939] | 0.816 [0.816–0.836] | **54 s** [53.5–53.8] | **0.142 m** [0.134–0.145] | 0.266 m | 0.447 m [0.433–0.462] | 0.606 m | 0 / 4 [2–5] | 0.232 [0.229–0.238] | 191 | 8 / 2 337 (0.34 %) | 36–47 / 2 860–2 970 |
+| ORB-SLAM3 relocalize | **0** (3 × `init_failure`) | 0 | – | – | – | – | – | 0 / 0 | – | 26 | – | – |
+
+* SP_SLAM3 on 11 → 02 is at least as good as on 11 → 01 (0.932 localized, 60 s, 0.160 m median,
+  p95 0.740 m). It is also close to 01 → 11 (0.896, 76 s, 0.095 m). Only the same-lighting
+  01 → 02 pair localizes at once (0.2 s).
+  The longest lost stretch after first localization was 0.8–23 s.
+* ORB-SLAM3 fails here as on 11 → 01 and 01 → 11: it never relocalizes. On same-lighting
+  01 → 02 it localizes 0.773 of frames at 0.034 m median.
+* Configs: `lunapolaris_mapreuse_map11_loc02_spslam3_learnedreloc_unitdesc_anchor_gate1`
+  (runs `20261109-180545_73d4c7`, `20261109-180604_c8e603`, `20261109-180635_169059`) and
+  `lunapolaris_mapreuse_map11_loc02_orbslam3_relocalize` (runs `20261109-181339_052034`,
+  `20261109-181339_c96d08`, `20261109-182147_4d2de4`).
+* Replays (`slambench view`, stride 2) are in the run dirs: SP_SLAM3 `20261109-180635_169059/replay.rrd`
+  (the median run, 366 MB) and ORB-SLAM3 `20261109-181339_c96d08/replay.rrd` (351 MB).
+
 #### Findings (r6)
 1. **Map anchoring (Fix 3) is the fix that matters for cross-day accuracy.** With it, VO-only frames
    are re-registered to nearby map keyframes:
