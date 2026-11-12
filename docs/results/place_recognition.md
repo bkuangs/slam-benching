@@ -46,6 +46,11 @@ This benchmark asks:
   - Raising the gate to **≥50 inliers** (ORB-SLAM3's own relocalization threshold) cuts gross false
     positives to ≤0.8% for the learned methods and costs 1–4 points of success.
   - At ≥100 inliers, gross false positives are ≤0.1% in sim and real.
+- **Component grid (section 6, real, the SLAM systems' own matching ported):** under a real lighting
+  change (seq03↔09, seq01↔11), ORB-SLAM3's and SP_SLAM3's BoW-guided matching get **0% even with
+  oracle retrieval**, while SP+LightGlue gets 30–60%. Across days with similar lighting (seq01↔02),
+  SuperPoint features carry the gain (ORB 21% → SP 90% with SP_SLAM3 matching), and LightGlue adds
+  only 3 points.
 
 ## Method
 
@@ -205,6 +210,16 @@ sbatch scripts/vpr_benchmark.sbatch --suite real --out /storage/ice1/3/6/bkuang7
 python scripts/vpr_summary.py --sim .../vpr/results/sim --real .../vpr/results/real --out tables.md
 ```
 
+Component grid (section 6). It prepares the real sessions on node-local disk inside the job, so it
+needs no scratch space. About 2 h for real0309 and 4.5 h for real on an L40S:
+
+```bash
+bash scripts/dbow3_decompress.sh          # once: uncompressed SP_SLAM3 vocabulary -> vpr_weights/
+sbatch scripts/vpr_grid.sbatch real0309 seq03 seq09
+sbatch scripts/vpr_grid.sbatch real seq01 seq02 seq11
+python scripts/vpr_grid_summary.py .../vpr/results/real0309_grid --out grid.md
+```
+
 ### Weights and assets
 
 All of these live under `/storage/ice1/3/6/bkuang7/slam-bench-work/`:
@@ -212,6 +227,8 @@ All of these live under `/storage/ice1/3/6/bkuang7/slam-bench-work/`:
 - `vpr_weights/ORBvoc.txt`, plus a parse cache `ORBvoc.txt.npz`.
 - `vpr_weights/MixVPR/` (the repo) and `vpr_weights/mixvpr_resnet50_4096.ckpt`.
 - `torch_home/hub/`: dinov2 and cosplace hub repos and checkpoints.
+- `vpr_weights/superpoint_voc.dbow3`: SP_SLAM3's DBoW3 vocabulary, decompressed by
+  `scripts/dbow3_decompress.sh` (the image ships it quicklz-compressed).
 
 ### Outputs
 
@@ -606,6 +623,97 @@ queries:
     - MixVPR: 16 KB per frame, 160 MB total;
     - AnyLoc: 197 KB per frame, ~2 GB total, so PCA to 512–1024 dimensions would be needed.
 
+### 6. Component grid: which classical part fails (real)
+
+**Question.** Which classical component fails across lighting: retrieval, features or matching? The
+earlier sections compared whole pipelines, and their ORB verifier was not what ORB-SLAM3 runs. This
+grid crosses every retrieval method with these verifiers, all on the same database frames, stereo
+depth and PnP:
+
+| verifier | features | matching |
+|---|---|---|
+| ORB + ORB-SLAM3 matching | ORB, ORB-SLAM3-like (1200 kp, 8 levels × 1.2) | port of ORB-SLAM3 `Tracking::Relocalization` |
+| SP + SP_SLAM3 matching | SuperPoint (LightGlue's, 1200 kp, unit descriptors) | port of SP_SLAM3 `Tracking::Relocalization` |
+| SP + LightGlue | the same SuperPoint keypoints | LightGlue, then PnP RANSAC |
+
+The two SLAM verifiers use the same features as their systems, so the comparison isolates one part
+at a time:
+
+- **matching:** SP_SLAM3 matching vs LightGlue, with identical features;
+- **features:** ORB vs SP, each with its own SLAM's matching;
+- **retrieval:** the columns.
+
+**Matching port.** `vpr/slam_matching.py` follows each system's `Tracking::Relocalization`:
+
+1. `SearchByBoW` against the candidate keyframe: vocabulary-node-guided matching with a 0.75 ratio
+   test. ORB-SLAM3 also applies its rotation-histogram check; SP_SLAM3 disables it.
+2. The candidate is rejected below 15 matches.
+3. PnP RANSAC; the candidate is rejected below 10 inliers.
+4. Up to two `SearchByProjection` passes, the second only when 30 < inliers < 50.
+5. Success needs ≥ 50 inliers.
+
+Details:
+
+- **Thresholds:** ORB-SLAM3 uses Hamming 50 / 100. SP_SLAM3 uses L2 0.52 / 1.19, its unit-descriptor
+  values from patch 0008.
+- **Vocabularies:** ORBvoc (node level `levelsup` 4) and SP_SLAM3's own DBoW3 vocabulary (levelsup 0,
+  BoW descriptor scale 0.46).
+- **Map points:** keyframe keypoints with stereo depth in 0.1–60 m.
+- **SP_SLAM3 variants:** BoW scale 1, and node level 2. The vocabulary's leaf centres have norm ≈ 0.94,
+  which suggests patch 0008's 0.46 scale may be wrong. It is not: scale 0.46 is equal or better (same
+  day 88–92% vs 84–89%), so only the default row is shown below.
+
+**Pairs:** seq03↔09 (different lighting, new download), seq01↔11 (different day and lighting) and
+seq01↔02 (different day, similar lighting), each in both directions, plus same-session controls
+(01, 03, 09, 11). Results directories: `vpr/results/real0309_grid` and `vpr/results/real_grid`
+(jobs 6959128 and 6959129). Every query is used (825–892 per pair).
+
+**Success** (< 0.1 m and < 2°) at the systems' own **≥ 50-inlier** gate, top-5 candidates (%). Both
+directions are pooled. Gross wrong-place false positives are ≤ 0.6% in every cell except DBoW2 +
+LightGlue on 01↔02 (3.1%).
+
+| verifier | retrieval | 03↔09 | 01↔11 | 01↔02 | same session |
+|---|---|---|---|---|---|
+| ORB + ORB-SLAM3 matching | ORB DBoW2 | 0 | 0 | 16 | 93 |
+| | MixVPR | 0 | 0 | 21 | 94 |
+| | oracle | 0 | 0 | 21 | 93 |
+| SP + SP_SLAM3 matching | ORB DBoW2 | 0 | 0 | 55 | 90 |
+| | SP DBoW3 | 0 | 0 | 84 | 89 |
+| | MixVPR | 0 | 0 | 90 | 91 |
+| | oracle | 0 | 0 | 90 | 88 |
+| SP + LightGlue | ORB DBoW2 | 9 | 4 | 63 | 96 |
+| | SP DBoW3 | 16 | 3 | 89 | 96 |
+| | MixVPR | **51** | **26** | 93 | 96 |
+| | AnyLoc | 50 | 21 | 94 | 96 |
+| | oracle | 60 | 30 | 93 | 96 |
+
+Where SLAM relocalization ends on cross-lighting pairs (oracle top-1). It never reaches PnP:
+
+- **seq03↔09:** 100% of queries end with < 15 `SearchByBoW` matches. The median is 3 for ORB and 0
+  for SP, while LightGlue finds a median of 163 matches on the same SP keypoints.
+- **seq01↔11:** the same.
+- **01↔02:** ORB-SLAM3 matching still stops at `SearchByBoW` for 63% of queries, and its successes
+  come through the projection passes. SP_SLAM3 matching stops there for only 1%.
+
+**Reading:**
+
+- **Under a real lighting change, the classical matching is the binding failure.**
+  - It fails before retrieval matters: oracle keyframes do not help, and neither do SuperPoint
+    features under SP_SLAM3's BoW-guided matching.
+  - SearchByBoW only compares descriptors that fall into the same vocabulary node. Under a lighting
+    change, corresponding descriptors land in different nodes, so the matches never form.
+  - Replacing only the matcher (SP_SLAM3 → LightGlue, same keypoints) takes oracle success from 0
+    to 30–60%.
+  - This explains why MixVPR + stock BoW verification stays at 0% inside SP_SLAM3 ([map_reuse](map_reuse.md)).
+- **Retrieval is the second gap.** With LightGlue, ORB/SP DBoW retrieval gets 3–16%, MixVPR 26–51%
+  and the oracle 30–60%. MixVPR closes most of that gap; AnyLoc is no better.
+- **Features matter on the milder change.** On 01↔02 the SLAM matcher works with SP and not with ORB
+  (21 → 90%), and LightGlue adds only 3 points on top. SP DBoW3 retrieval is far better than ORB
+  DBoW2 there (84–89 vs 55–63%), but both still fail across lighting.
+- **Same session:** all verifiers are at 88–96%, so the ports are sound and the failures are not
+  implementation artefacts.
+- **There is no "ORB + LightGlue" cell.** No LightGlue weights exist for ORB descriptors.
+
 ## Caveats
 
 - **DBoW2 baseline.** The candidate logic is simplified: plain L1 ranking, without covisibility
@@ -629,8 +737,9 @@ queries:
   - The 0.1 m / 2° success threshold is strict relative to SGBM depth quality, so many correct-place
     localizations count as false positives (inaccurate). Read the gross column for wrong-place
     risk.
-- The **ORB verifier** uses ratio + mutual matching, not ORB-SLAM3's BoW-guided `SearchByBoW`.
-  It fails even with the oracle frame, which matches the feature-level study.
+- The **ORB verifier** in sections 3–4 uses ratio + mutual matching, not ORB-SLAM3's BoW-guided
+  `SearchByBoW`. It fails even with the oracle frame, which matches the feature-level study.
+  Section 6 replaces it with a port of the SLAM systems' own matching, and the conclusion holds.
 - K=5 verification takes the candidate with the most inliers. There is no pose-consistency check
   across candidates or over time.
 

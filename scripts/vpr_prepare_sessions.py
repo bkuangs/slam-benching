@@ -23,7 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vpr.sessions import read_frames_csv, write_session  # noqa: E402
 
 SIM_CONDITIONS = ["nominal", "low_sun", "dim", "glare"]
-REAL = {"seq01": ("sequence_01", 0.0), "seq02": ("sequence_02", 0.0), "seq11": ("sequence_11", -1.63)}
+# (sequence, right_row_shift_px); seq03 / seq09 measured 0.03 / 0.11 px with scripts/measure_stereo_row_offset.py
+REAL = {"seq01": ("sequence_01", 0.0), "seq02": ("sequence_02", 0.0), "seq11": ("sequence_11", -1.63),
+        "seq03": ("sequence_03", 0.0), "seq09": ("sequence_09", 0.0)}
 GT_TOPIC = "/vrpn_mocap/ZED2_camera_marker/rectified/pose"
 
 
@@ -58,13 +60,15 @@ def sim_session(root, name, c, out):
     print(meta["name"], len(T), "frames")
 
 
-def real_sessions(root, work, out):
+def real_sessions(root, work, out, names=None):
     from slambench.datasets.lunapolaris import LunaPolarisAdapter
     from slambench.evaluation.metrics import associate
     from slambench.trajectory import Trajectory
     from slambench.types import SensorMode
 
     for name, (seq, shift) in REAL.items():
+        if names and name not in names:
+            continue
         ds = LunaPolarisAdapter(Path(root), seq, {"gt_topic": GT_TOPIC, "right_row_shift_px": shift})
         prep = ds.prepare_cached(SensorMode.STEREO, Path(work) / "prepared")
         t, left, _ = read_frames_csv(os.path.realpath(prep.directory))
@@ -93,14 +97,17 @@ def main():
     ap.add_argument("--work", default=os.path.expanduser("~/scratch/slam-bench-work"),
                     help="slambench work_dir (prepared inputs are cached under work/prepared)")
     ap.add_argument("--skip-real", action="store_true")
+    ap.add_argument("--skip-sim", action="store_true")
+    ap.add_argument("--real", nargs="+", choices=list(REAL), help="only these LunaPolaris sessions")
     ap.add_argument("--largescale", action="store_true", help="write only the OmniLRS LargeScale sessions")
     a = ap.parse_args()
     if a.largescale:
         largescale_sessions(a.renders, a.out)
         return
-    sim_sessions(a.renders, a.out)
+    if not a.skip_sim:
+        sim_sessions(a.renders, a.out)
     if not a.skip_real:
-        real_sessions(a.lunapolaris, a.work, a.out)
+        real_sessions(a.lunapolaris, a.work, a.out, a.real)
 
 
 if __name__ == "__main__":

@@ -941,3 +941,76 @@ low-spotlight sequence.
 * **What was not measured.** Loop closing never fires in these SP mapping runs, so the effect of
   the BoW / descriptor change on loop closure is untested. The sim improvement was not ablated per
   fix.
+
+#### seq03 ↔ seq09 (third real lighting pair)
+seq03 is lit by the ceiling lights. seq09 is lit by a low spotlight with the robot light off. Both
+cover the same terrain. Same r6 setup as above: SP_SLAM3 with a 1-frame gate (`r6`), its monitor
+variant (`r7`, patch 0009, cross pairs only) and stock ORB-SLAM3 relocalize. Each cell is the median
+of 3 runs, with the [range]. Errors are fixed-frame translation errors. The seq11 row shift is not
+applied, because seq03/09 rectification offsets are 0.03 / 0.11 px.
+
+**Session-A maps (ATE).**
+
+| sequence | ORB-SLAM3 | SP_SLAM3 r6 |
+|---|---|---|
+| seq03 | 0.061 m | 0.065 m |
+| seq09 | 0.090 m | **0.59 m** (3 maps: 0.567 / 0.592 / 0.618 m) |
+
+The SP_SLAM3 seq09 map fails the same way in all 3 runs:
+
+* The error jumps from about 0.9 m to about 0 and back between 300 and 370 s, which is likely the
+  turn toward the light (seq09's documented odometry loss). This pattern was checked on map
+  `fa245b`.
+* The session-B runs on map09 use the median map, `20261111-150720_fa245b`, pinned in their configs.
+
+| map → query | system | localized | ≤ 0.1 m | ≤ 0.25 m | median | max | first loc | VO-only | false / events |
+|---|---|---|---|---|---|---|---|---|---|
+| 03 → 09 | **SP_SLAM3 r6** | **0.93** [0.93–0.93] | 0.55 | 0.86 | **0.09 m** | 0.52 m | 62 s | 0.09 | 0 / 7 |
+| 03 → 09 | SP_SLAM3 r7 (monitor) | 0.90 [0.90–0.90] | 0.51 | 0.81 | 0.09 m | 0.49 m | 88 s | 0.10 | 0 / 7 |
+| 03 → 09 | ORB-SLAM3 | **0** (3 × `init_failure`) | 0 | 0 | – | – | – | – | 0 / 0 |
+| 09 → 03 | SP_SLAM3 r6 | 0.91 [0.91–0.91] | 0.00 | 0.05 | 0.57 m | 1.01 m | 82 s | 0.17 | 5 / 9 † |
+| 09 → 03 | SP_SLAM3 r7 (monitor) | 0.91 [0.91–0.91] | 0.00 | 0.05 | 0.61 m | 1.02 m | 81 s | 0.16 | 6 / 10 † |
+| 09 → 03 | ORB-SLAM3 | **0** (3 × `init_failure`) | 0 | 0 | – | – | – | – | 0 / 0 |
+| 03 → 03 | SP_SLAM3 r6 | 1.00 | 0.98 | 1.00 | 0.06 m | 0.11 m | 0 s | 0 | 0 / 3 |
+| 03 → 03 | ORB-SLAM3 | 1.00 | 0.95 | 1.00 | 0.06 m | 0.11 m | 0 s | 0 | 0 / 3 |
+| 09 → 09 | SP_SLAM3 r6 | 1.00 | 0.01 | 0.08 | 0.52 m | 0.90 m | 0 s | 0 | 3 / 11 † |
+| 09 → 09 | ORB-SLAM3 | 0.98 | 0.59 | 0.98 | 0.09 m | 0.15 m | 18 s | 0 | 0 / 12 |
+
+† **The errors on the SP map09 rows come from the map, not from relocalization.**
+
+* Same-session 09 → 09 on that map has the same 0.52 m median error. Its first localization is
+  already 0.77 m off, and 09 → 03 starts at 0.71 m off.
+* The fixed-frame evaluation maps poses through the mapping run's map→GT alignment, so a distorted
+  map shows up directly as pose error.
+* The 0.5 m "false relocalizations" are therefore correct placements in a map that is wrong by more
+  than 0.5 m.
+* Only the localized fraction and the first-localization time are meaningful on these rows.
+
+* **This replicates the seq01 ↔ seq11 result on a second real pair.**
+  * Stock ORB-SLAM3 never relocalizes across lighting in either direction (the offline grid
+    predicted this, claim 12). On same lighting it localizes 98–100 % of frames.
+  * SP_SLAM3 r6 localizes 91–93 % of frames in both directions, first at 62–82 s.
+  * Where the map is good (03 → 09), SP_SLAM3 r6 reaches 0.09 m median error, the same as on
+    01 → 11 (0.095 m).
+* **The monitor (r7) did not help here.** It localized 3 points less on 03 → 09 and found its
+  first localization 26 s later. The errors are about the same, and there was no divergence for it
+  to catch.
+* **New weakness: SP_SLAM3 mapping is less robust than ORB-SLAM3 on seq09.** Its maps are 0.59 m vs
+  0.09 m ATE in 3/3 runs. A SP_SLAM3 map-reuse win therefore needs a SP_SLAM3 map that is good in
+  the first place.
+* **Configs** (`configs/lunapolaris/map_reuse/`):
+  * `lunapolaris_mapreuse_map{03,09}_loc{09,03,03,09}_{orbslam3_relocalize,spslam3_learnedreloc_unitdesc_anchor_gate1}`;
+  * `…_gate1_monitor` for the cross pairs.
+
+  Session-A configs: `lunapolaris_seq0{3,9}_{orbslam3_stereo_map,spslam3_stereo_map_gd_unitdesc}`.
+* **Run ids:**
+
+  | pair | SP_SLAM3 r6 | SP_SLAM3 r7 (monitor) | ORB-SLAM3 |
+  |---|---|---|---|
+  | 03 → 09 | `20261111-154754_3b18e9`, `_8e24d5`, `20261111-154824_dccb2e` | `20261111-154754_05adfe`, `20261111-154824_69b772`, `20261111-154955_b4ef1f` | `20261111-153831_998af7`, `20261111-154052_{3942cb,b2d737}` |
+  | 09 → 03 | `20261111-181900_{24e69f,94601b,a74539}` | `20261111-181900_{70ff64,8d643e}`, `20261111-181922_cad66d` | `20261111-154121_164e14`, `20261111-154323_5a4990`, `20261111-154453_262e52` |
+  | 03 → 03 | `20261111-155055_143b94`, `20261111-155326_{cd5138,f9d782}` | – | `20261111-154754_{2b3ff5,da24c0}`, `20261111-155426_ca6482` |
+  | 09 → 09 | `20261111-181922_{1a2ebb,828f0e,fd9dcc}` | – | `20261111-155426_555ed4`, `20261111-155627_{415284,73a813}` |
+
+  Session-A maps: ORB-SLAM3 `20261111-150720_2fdf74` (seq03) and `_17c7ef` (seq09); SP_SLAM3
+  `20261111-150720_7d0db5` (seq03) and `fa245b` / `20261111-173244_{57e142,e10db1}` (seq09).

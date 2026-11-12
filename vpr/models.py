@@ -149,6 +149,18 @@ class OrbSlamLikeORB:
         self.orb = cv2.ORB_create(nfeatures=3 * n, scaleFactor=1.2, nlevels=8, fastThreshold=7)
 
     def __call__(self, bgr: np.ndarray) -> Optional[np.ndarray]:
+        return self._detect_compute(bgr)[1]
+
+    def features(self, bgr: np.ndarray) -> dict:
+        """kp (n, 2) float32, angle (n,) degrees, octave (n,) int, desc (n, 32) uint8."""
+        kps, desc = self._detect_compute(bgr)
+        if desc is None or not kps:
+            return {"kp": np.zeros((0, 2), np.float32), "angle": np.zeros(0, np.float32),
+                    "octave": np.zeros(0, int), "desc": np.zeros((0, 32), np.uint8)}
+        return {"kp": np.array([k.pt for k in kps], np.float32), "angle": np.array([k.angle for k in kps], np.float32),
+                "octave": np.array([k.octave for k in kps], int), "desc": desc}
+
+    def _detect_compute(self, bgr: np.ndarray):
         g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         kps = self.orb.detect(g, None)
         if len(kps) > self.n:
@@ -162,5 +174,4 @@ class OrbSlamLikeORB:
             rank[order] = np.arange(len(order)) - starts
             keep = np.lexsort((-resp, rank))[:self.n]
             kps = [kps[i] for i in keep]
-        kps, desc = self.orb.compute(g, kps)
-        return desc
+        return self.orb.compute(g, kps)

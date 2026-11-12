@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-"""Visual place recognition benchmark: AnyLoc / MixVPR / CosPlace vs DBoW2 (ORB) retrieval, plus
-end-to-end relocalization (top-K retrieval -> SuperPoint+LightGlue or ORB matching -> PnP RANSAC).
+"""Visual place recognition benchmark: AnyLoc / MixVPR / CosPlace vs DBoW2 (ORB) and DBoW3 (SuperPoint)
+retrieval, plus end-to-end relocalization (top-K retrieval -> local matching -> PnP RANSAC).
+
+Verifiers (local features x matcher, same PnP and inlier gate for all):
+  orb_slam         ORB-SLAM3's relocalization matching (SearchByBoW over FeatureVector nodes 4 levels above the
+                   ORBvoc leaves, TH_LOW 50, ratio 0.75, rotation histogram; projection passes below 50 inliers)
+  sp_slam*         SP_SLAM3's (SPmatcher with unit descriptors: L2 0.52 / 1.19, no orientation, DBoW3 leaf
+                   nodes); _s1 quantizes unscaled unit descriptors, _lvl2 groups by level-2 nodes (ORB-SLAM3-like)
+  sp_lg, aliked_lg, disk_lg   LightGlue;  orb, sp_nn   brute-force mutual NN + ratio
 
 Sessions come from scripts/vpr_prepare_sessions.py. Run inside the LAC image on a GPU
 (scripts/vpr_benchmark.sbatch); summarise with scripts/vpr_summary.py. See docs/results/place_recognition.md.
@@ -25,6 +32,7 @@ sys.path.insert(0, str(REPO / "sim" / "omnilrs"))
 from cross_lighting_reloc import Extractors, localize, pose_error  # noqa: E402
 from vpr import metrics as M  # noqa: E402
 from vpr.dbow import BowDatabase, Vocabulary  # noqa: E402
+from vpr.slam_matching import ORB_SLAM3, SP_SLAM3_UNIT, relocalize, search_by_bow  # noqa: E402
 from vpr.models import DinoV2Facet, GlobalExtractor, OrbSlamLikeORB, kmeans_cosine, vlad  # noqa: E402
 from vpr.sessions import load_session  # noqa: E402
 from vpr.stereo import StereoDepth  # noqa: E402
@@ -58,7 +66,21 @@ for _alt in (60, 30):
         "db": {"every": 5, "offset": 0}, "q": {"every": 5, "offset": 2},
         "num_disp": 32, "max_depth_m": 200.0,
     }
-METHODS = ["bow", "anyloc", "mixvpr", "cosplace"]
+# LunaPolaris seq03 (ceiling light) <-> seq09 (low spotlight, no robot light): same terrain, lighting only
+SUITES["real0309"] = {**SUITES["real"], "sessions": ["real_seq03", "real_seq09"],
+                      "pairs": [("real_seq03", "real_seq09"), ("real_seq09", "real_seq03"),
+                                ("real_seq03", "real_seq03"), ("real_seq09", "real_seq09")]}
+METHODS = ["bow", "sp_bow", "sp_bow_s1", "anyloc", "mixvpr", "cosplace"]
+SP_BOW_SCALE = (256.0 / 1200) ** 0.5  # SP_SLAM3 sp_bow_descriptor_scale for unit descriptors, 1200 keypoints
+SP_BOW_METHODS = {"sp_bow": SP_BOW_SCALE, "sp_bow_s1": 1.0}
+# verifier -> (feature family, matcher spec, vocabulary, levelsup, BoW descriptor scale)
+SLAM_VERIFIERS = {
+    "orb_slam": ("orbslam", ORB_SLAM3, "ORBvoc.txt", 4, 1.0),
+    "sp_slam": ("sp", SP_SLAM3_UNIT, "superpoint_voc.dbow3", 0, SP_BOW_SCALE),
+    "sp_slam_s1": ("sp", SP_SLAM3_UNIT, "superpoint_voc.dbow3", 0, 1.0),
+    "sp_slam_s1_lvl2": ("sp", SP_SLAM3_UNIT, "superpoint_voc.dbow3", 3, 1.0),  # L 5 - levelsup 3 = level 2
+}
+VERIFIERS = ["orb_slam", "sp_slam", "sp_slam_s1", "sp_slam_s1_lvl2", "sp_lg"]
 MIN_INLIERS = 20
 TOPN = 25
 
@@ -125,6 +147,32 @@ def compute_descriptors(a, sessions, frames, frames_db, maps, timer, mem):
                 timer.add("extract/bow", time.perf_counter() - t)
         desc["bow"] = d
         mem["bow"] = {"gpu_peak_mb": 0.0, "note": "CPU (OpenCV ORB + numpy DBoW2)"}
+    sp_bow = [m for m in a.methods if m in SP_BOW_METHODS]
+    if sp_bow:
+        from cross_lighting_reloc import MAX_KP
+        from lightglue import SuperPoint
+        voc = Vocabulary.load(os.path.join(a.weights, "superpoint_voc.dbow3"))
+        sp = SuperPoint(max_num_keypoints=MAX_KP, detection_threshold=0.0).eval().to(dev)
+        for m in sp_bow:
+            desc[m] = {}
+        for s, idx in frames.items():
+            for i in idx:
+                im = imread(sessions[s].left_path(i))
+                sync()
+                t = time.perf_counter()
+                with torch.no_grad():
+                    img = torch.from_numpy(im[..., ::-1].copy()).permute(2, 0, 1).float().div(255).to(dev)
+                    dsp = sp.extract(img)["descriptors"][0].cpu().numpy()
+                sync()
+                timer.add("extract/superpoint", time.perf_counter() - t)
+                for m in sp_bow:
+                    t = time.perf_counter()
+                    desc[m][None, s, i] = voc.transform(dsp * SP_BOW_METHODS[m])
+                    timer.add(f"extract/{m}_quantize", time.perf_counter() - t)
+        for m in sp_bow:
+            mem[m] = {"gpu_peak_mb": 0.0, "note": f"LightGlue SuperPoint {MAX_KP} kp + numpy DBoW3, "
+                                                  f"descriptor scale {SP_BOW_METHODS[m]:.4f}"}
+        del sp
     for name in [m for m in a.methods if m in ("mixvpr", "cosplace")]:
         gpu_peak_reset()
         ex = GlobalExtractor(name, dev, a.weights)
@@ -182,15 +230,15 @@ def compute_descriptors(a, sessions, frames, frames_db, maps, timer, mem):
 
 def retrieval(desc, method, m, q, db_idx, q_idx, timer):
     """(similarity (n_q, n_db), retrieval seconds per query, bytes per database frame)."""
-    if method == "bow":
-        dbase = BowDatabase([desc["bow"][None, m, i] for i in db_idx])
+    if method == "bow" or method in SP_BOW_METHODS:
+        dbase = BowDatabase([desc[method][None, m, i] for i in db_idx])
         sim = np.zeros((len(q_idx), len(db_idx)))
         shared = np.zeros((len(q_idx), len(db_idx)), np.int64)
         t = time.perf_counter()
         for r, i in enumerate(q_idx):
-            sim[r], shared[r] = dbase.query(desc["bow"][None, q, i])
+            sim[r], shared[r] = dbase.query(desc[method][None, q, i])
         dt = (time.perf_counter() - t) / max(len(q_idx), 1)
-        timer.add(f"retrieve/bow/{m}", dt)
+        timer.add(f"retrieve/{method}/{m}", dt)
         return sim, dt, dbase.nbytes_per_entry(), shared
     key = m if method == "anyloc" else None
     D = np.stack([desc[method][key, m, i] for i in db_idx]).astype(np.float32)
@@ -206,26 +254,49 @@ def retrieval(desc, method, m, q, db_idx, q_idx, timer):
 class Verifier:
     """Caches local features and database depth; verifies (map frame, query frame) with PnP RANSAC."""
 
-    def __init__(self, sessions, cfg, timer, verifiers, depth_sources):
+    def __init__(self, sessions, cfg, timer, verifiers, depth_sources, weights):
         self.S, self.cfg, self.timer, self.verifiers, self.depth_sources = sessions, cfg, timer, verifiers, depth_sources
         self.ex = Extractors("cuda" if torch.cuda.is_available() else "cpu")
-        self.feat, self.depth = {}, {}
+        self.orbslam = OrbSlamLikeORB()
+        self.voc = {f: Vocabulary.load(os.path.join(weights, f)) for f in {SLAM_VERIFIERS[v][2] for v in verifiers
+                                                                           if v in SLAM_VERIFIERS}}
+        self.feat, self.fv, self.depth = {}, {}, {}
         self.pool = ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 1)))
         self.stereo = {s: StereoDepth(S.K[0, 0], S.baseline_m, cfg["num_disp"]) for s, S in sessions.items()}
 
-    def features(self, method, s, i):
-        k = (method, s, i)
+    @staticmethod
+    def family(v):
+        """Feature cache key: SLAM verifiers share features with the LightGlue / NN verifier of the same net."""
+        return SLAM_VERIFIERS[v][0] if v in SLAM_VERIFIERS else v.split("_")[0] if v != "orb" else "orb"
+
+    def features(self, v, s, i):
+        fam = self.family(v)
+        k = (fam, s, i)
         if k not in self.feat:
             im = imread(self.S[s].left_path(i))
             sync()
             t = time.perf_counter()
-            f = self.ex.extract(method, im)
+            if fam == "orbslam":
+                f = self.orbslam.features(im)
+            else:
+                f = self.ex.extract("orb" if fam == "orb" else f"{fam}_lg", im)
             sync()
-            self.timer.add(f"verify/extract_{method}", time.perf_counter() - t)
+            self.timer.add(f"verify/extract_{fam}", time.perf_counter() - t)
             if "t" in f:
-                f["t"] = {kk: v.cpu() for kk, v in f["t"].items()}
+                f["t"] = {kk: x.cpu() for kk, x in f["t"].items()}
+                f["desc"] = f["t"]["descriptors"][0].numpy()
             self.feat[k] = f
         return self.feat[k]
+
+    def feature_vector(self, v, s, i):
+        _, _, voc, levelsup, scale = SLAM_VERIFIERS[v]
+        k = (voc, levelsup, scale, s, i)
+        if k not in self.fv:
+            d = self.features(v, s, i)["desc"]
+            t = time.perf_counter()
+            self.fv[k] = self.voc[voc].transform(d * scale if scale != 1.0 else d, levelsup)[1]
+            self.timer.add(f"verify/fv_{v}", time.perf_counter() - t)
+        return self.fv[k]
 
     def depth_map(self, src, s, i):
         k = (src, s, i)
@@ -241,25 +312,58 @@ class Verifier:
                 self.timer.add("verify/stereo_sgbm", time.perf_counter() - t)
         return self.depth[k]
 
+    def _localize(self, src, m, i, kp_r, kp_q, mt):
+        return localize(kp_r, kp_q, mt, self.depth_map(src, m, i), self.S[m].T[i], self.S[m].K,
+                        self.cfg.get("max_depth_m", 60.0))
+
+    def _result(self, Te, q, j):
+        return pose_error(Te, self.S[q].T[j]) if Te is not None else (np.inf, np.inf)
+
     def _pnp(self, v, src, m, i, q, j, kp_r, kp_q, mt):
         t = time.perf_counter()
-        Te, n, _ = localize(kp_r, kp_q, mt, self.depth_map(src, m, i), self.S[m].T[i], self.S[m].K,
-                            self.cfg.get("max_depth_m", 60.0))
+        Te, n, _ = self._localize(src, m, i, kp_r, kp_q, mt)
         dt = time.perf_counter() - t
-        et, er = pose_error(Te, self.S[q].T[j]) if Te is not None else (np.inf, np.inf)
-        return (v, src), (n, et, er), dt
+        return (v, src), (n, *self._result(Te, q, j), "", len(mt)), dt
+
+    def _slam(self, v, src, m, i, q, j, fr, fq, fv_r, fv_q):
+        """SLAM-style relocalization against one map frame: SearchByBoW -> PnP -> projection passes."""
+        spec = SLAM_VERIFIERS[v][1]
+        t = time.perf_counter()
+        S = self.S[m]
+        depth = self.depth_map(src, m, i)
+        kp = fr["kp"]
+        ui = np.clip(np.round(kp).astype(int), 0, [depth.shape[1] - 1, depth.shape[0] - 1])
+        z = depth[ui[:, 1], ui[:, 0]].astype(np.float64) / 1000.0
+        valid = (z > 0.1) & (z < self.cfg.get("max_depth_m", 60.0))  # keyframe features with a map point
+        Xc = np.linalg.solve(S.K, np.c_[kp, np.ones(len(kp))].T).T * z[:, None]
+        X = (S.T[i][:3, :3] @ Xc.T).T + S.T[i][:3, 3]
+        oct_r = fr.get("octave", np.zeros(len(kp), int))
+        oct_q = fq.get("octave", np.zeros(len(fq["kp"]), int))
+        mt = search_by_bow(spec, fv_r, fv_q, fr["desc"], fq["desc"], valid, fr.get("angle"), fq.get("angle"))
+        ctx = {"K": S.K, "img_wh": (depth.shape[1], depth.shape[0]), "X_ref": X,
+               "dist_ref": np.linalg.norm(Xc, axis=1), "octave_ref": oct_r, "ref_valid": valid,
+               "kp_q": fq["kp"], "octave_q": oct_q, "desc_ref": fr["desc"], "desc_q": fq["desc"],
+               "angle_ref": fr.get("angle"), "angle_q": fq.get("angle")}
+        Te, n, _, stage = relocalize(spec, mt, lambda mm: self._localize(src, m, i, kp, fq["kp"], mm), ctx)
+        dt = time.perf_counter() - t
+        return (v, src), (n, *self._result(Te, q, j), stage, len(mt)), dt
 
     def verify_many(self, m, frames_r, q, j):
-        """{i: {(verifier, depth_src): (n_inliers, err_t, err_r)}} for map frames (m, i) vs query frame (q, j).
+        """{i: {(verifier, depth_src): (n_inliers, err_t, err_r, stage, n_matches)}} for map frames (m, i) vs query (q, j).
 
-        Matching runs sequentially on the GPU; the PnP RANSAC calls (OpenCV releases the GIL) run in a thread
-        pool. Per-call timings are recorded individually, so they are per-candidate single-thread costs."""
+        Matching runs sequentially on the GPU; the PnP RANSAC calls (OpenCV releases the GIL) and the SLAM-style
+        verifiers run in a thread pool. Per-call timings are recorded individually, so they are per-candidate
+        single-thread costs."""
         jobs = []
         for i in frames_r:
             for src in self.depth_sources:
                 self.depth_map(src, m, i)
             for v in self.verifiers:
                 fr, fq = self.features(v, m, i), self.features(v, q, j)
+                if v in SLAM_VERIFIERS:
+                    fv_r, fv_q = self.feature_vector(v, m, i), self.feature_vector(v, q, j)
+                    jobs += [(i, self._slam, (v, src, m, i, q, j, fr, fq, fv_r, fv_q)) for src in self.depth_sources]
+                    continue
                 if "t" in fr:
                     dev = self.ex.dev
                     fr = {**fr, "t": {k: x.to(dev) for k, x in fr["t"].items()}}
@@ -269,13 +373,13 @@ class Verifier:
                 mt = self.ex.match(v, fr, fq)
                 sync()
                 self.timer.add(f"verify/match_{v}", time.perf_counter() - t)
-                jobs += [(i, v, src, fr["kp"], fq["kp"], mt) for src in self.depth_sources]
+                jobs += [(i, self._pnp, (v, src, m, i, q, j, fr["kp"], fq["kp"], mt)) for src in self.depth_sources]
         out = {i: {} for i in frames_r}
-        futs = [(i, self.pool.submit(self._pnp, v, src, m, i, q, j, kr, kq, mt)) for i, v, src, kr, kq, mt in jobs]
+        futs = [(i, self.pool.submit(fn, *args)) for i, fn, args in jobs]
         for i, fu in futs:
             key, val, dt = fu.result()
             out[i][key] = val
-            self.timer.add(f"verify/pnp_{key[0]}_{key[1]}", dt)
+            self.timer.add(f"verify/{'slam' if key[0] in SLAM_VERIFIERS else 'pnp'}_{key[0]}_{key[1]}", dt)
         return out
 
 
@@ -290,7 +394,7 @@ def main():
     ap.add_argument("--anyloc-layer", type=int, default=31)
     ap.add_argument("--vlad-k", type=int, default=32)
     ap.add_argument("--vocab-patches", type=int, default=200000, help="patches sampled for each VLAD vocabulary")
-    ap.add_argument("--verifiers", nargs="+", default=["sp_lg", "orb"])
+    ap.add_argument("--verifiers", nargs="+", default=VERIFIERS)
     ap.add_argument("--e2e-stride", type=int, default=1, help="use every n-th query for end-to-end relocalization")
     ap.add_argument("--no-e2e", action="store_true")
     ap.add_argument("--limit-queries", type=int, default=0, help="debug: cap queries/db per session")
@@ -331,23 +435,22 @@ def main():
             sim, dt, nb, shared = retrieval(desc, method, m, q, db_idx, q_idx, timer)
             rk[method] = M.rank_by_similarity(sim, TOPN)
             bytes_per[method] = nb
-            if shared is not None:  # DBoW2 diagnostics: shared words with best positive vs top-1
+            if shared is not None:  # DBoW diagnostics: shared words with best positive vs top-1
                 has = pos.any(1)
                 best_pos = np.where(pos, shared, -1).max(1)
-                extra["bow_shared_words_best_positive_median"] = float(np.median(best_pos[has])) if has.any() else None
-                extra["bow_shared_words_top1_median"] = float(np.median(shared[np.arange(len(q_idx)), rk[method][:, 0]]))
+                extra[method] = {
+                    "bow_shared_words_best_positive_median": float(np.median(best_pos[has])) if has.any() else None,
+                    "bow_shared_words_top1_median": float(np.median(shared[np.arange(len(q_idx)), rk[method][:, 0]]))}
         for method, r in rk.items():
             row = {"map": m, "query": q, "method": method, **M.recall_at_k(r, pos, (1, 5, 10))}
-            if method == "bow":
-                row.update(extra)
+            row.update(extra.get(method, {}))
             rec_rows.append(row)
             print(f"  {m} -> {q} {method:8s} R@1 {row['R@1']:.3f} R@5 {row['R@5']:.3f} R@10 {row['R@10']:.3f}",
                   flush=True)
         rankings[m, q] = rk
         np.savez(os.path.join(a.out, f"rank_{m}__{q}.npz"), db=db_idx, q=q_idx, pos=pos,
                  **{k: v for k, v in rk.items()})
-    keys = sorted({k for r in rec_rows for k in r}, key=lambda k: list(rec_rows[0]).index(k)
-                  if k in rec_rows[0] else 99)
+    keys = list(dict.fromkeys(k for r in rec_rows for k in r))
     with open(os.path.join(a.out, "recall.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
@@ -358,11 +461,11 @@ def main():
 
     # ---- end-to-end relocalization
     if not a.no_e2e:
-        depth_sources = ["stereo"] if a.suite == "real" else ["gt", "stereo"]
-        ver = Verifier(sessions, cfg, timer, a.verifiers, depth_sources)
+        depth_sources = ["stereo"] if all(S.kind == "real" for S in sessions.values()) else ["gt", "stereo"]
+        ver = Verifier(sessions, cfg, timer, a.verifiers, depth_sources, a.weights)
         e2e_path = os.path.join(a.out, "e2e.csv")
         fields = ["map", "query", "q_frame", "method", "verifier", "depth", "K", "status", "db_frame",
-                  "db_is_positive", "has_positive", "n_inliers", "err_t_m", "err_r_deg"]
+                  "db_is_positive", "has_positive", "n_inliers", "err_t_m", "err_r_deg", "stage", "n_matches"]
         with open(e2e_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
@@ -381,7 +484,7 @@ def main():
                                                                (1, 5)):
                         top = [int(c) for c in rk[meth][r, :K]]
                         best = max(top, key=lambda c: res[c][v, src][0])
-                        n, et, er = res[best][v, src]
+                        n, et, er, stage, n_matches = res[best][v, src]
                         if n < MIN_INLIERS:
                             status = "none"
                         elif et < cfg["succ_m"] and er < cfg["succ_deg"]:
@@ -392,12 +495,14 @@ def main():
                                     "K": K, "status": status, "db_frame": db_idx[best],
                                     "db_is_positive": int(pos[r, best]), "has_positive": int(pos[r].any()),
                                     "n_inliers": n, "err_t_m": round(et, 4) if np.isfinite(et) else "",
-                                    "err_r_deg": round(er, 3) if np.isfinite(er) else ""})
+                                    "err_r_deg": round(er, 3) if np.isfinite(er) else "", "stage": stage,
+                                    "n_matches": n_matches})
                 f.flush()
                 # drop query-session features not needed later to bound memory
                 print(f"e2e {m} -> {q}: {len(q_idx[::a.e2e_stride])} queries {time.time() - t0:.0f}s", flush=True)
                 if len(ver.feat) > 6000:
                     ver.feat.clear()
+                    ver.fv.clear()
 
     json.dump({"timing": timer.summary(), "memory": mem, "descriptor_bytes_per_db_frame": descriptor_bytes,
                "gpu": torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"},

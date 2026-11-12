@@ -11,9 +11,10 @@ import os
 import statistics
 from collections import defaultdict
 
-METHOD_NAMES = {"bow": "DBoW2 (ORB, ORBvoc)", "anyloc": "AnyLoc (DINOv2-G VLAD)", "mixvpr": "MixVPR (R50, 4096)",
-                "cosplace": "CosPlace (R50, 2048)", "oracle": "oracle (GT nearest)"}
-ORDER = ["bow", "anyloc", "mixvpr", "cosplace", "oracle"]
+METHOD_NAMES = {"bow": "DBoW2 (ORB, ORBvoc)", "sp_bow": "DBoW3 (SuperPoint, scale 0.46)",
+                "sp_bow_s1": "DBoW3 (SuperPoint, scale 1)", "anyloc": "AnyLoc (DINOv2-G VLAD)",
+                "mixvpr": "MixVPR (R50, 4096)", "cosplace": "CosPlace (R50, 2048)", "oracle": "oracle (GT nearest)"}
+ORDER = ["bow", "sp_bow", "sp_bow_s1", "anyloc", "mixvpr", "cosplace", "oracle"]
 
 
 def short(s):

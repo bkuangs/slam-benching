@@ -314,6 +314,8 @@ def test_map_reuse_configs_are_consistent():
         s = c["algorithm"]["settings"]
         assert s["reuse_mode"] in mr.REUSE_MODES and "load_map" in s, p.name
         name = Path(s["load_map"]).name
+        if name not in by_name:  # load_map pinned to one mapping run: <runs>/<map config>/<run id>
+            name = Path(s["load_map"]).parent.name
         mapcfg = yaml.safe_load(by_name[name].read_text())
         ms = mapcfg["algorithm"]["settings"]
         assert ms["save_map"] is True and mapcfg["algorithm"]["name"] == c["algorithm"]["name"], p.name
