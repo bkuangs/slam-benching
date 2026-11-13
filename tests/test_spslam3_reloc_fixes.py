@@ -104,3 +104,70 @@ def test_summarize_map_anchor_log(tmp_path):
     out = sp.summarize_map_anchor(p)
     assert out["n_attempts"] == 2 and out["n_accepted"] == 1
     assert out["accepted_correction_m"]["median"] == pytest.approx(0.4)
+
+
+def test_reloc_monitor_settings(tmp_path):
+    run = _mapping_run(tmp_path, {"global_descriptors": True})
+    base = {"load_map": str(run), "learned_reloc": True}
+    a, ds, ctx = _ctx(tmp_path, base)
+    text = _settings_text(a, ctx)
+    assert "RelocMonitor" not in text and "reloc_monitor" not in ctx.settings
+    a2, _, ctx2 = _ctx(tmp_path, {**base, "reloc_monitor": False})
+    assert _settings_text(a2, ctx2) == text
+    a, ds, ctx = _ctx(tmp_path, {**base, "reloc_monitor": True, "reloc_monitor_period": 10,
+                                 "reloc_monitor_max_dev_m": 1.5, "reloc_monitor_max_vo_s": 2})
+    fs = _fs(a, ctx)
+    assert int(fs.getNode("RelocMonitor.enable").real()) == 1
+    assert int(fs.getNode("RelocMonitor.period").real()) == 10
+    assert fs.getNode("RelocMonitor.maxDevM").real() == pytest.approx(1.5)
+    assert fs.getNode("RelocMonitor.maxDevDeg").real() == pytest.approx(3.0)
+    assert fs.getNode("RelocMonitor.maxVOs").real() == pytest.approx(2.0)
+    assert fs.getNode("RelocMonitor.maxUnverifiedS").real() == 0
+    assert fs.getNode("RelocMonitor.logFile").string() == str((ctx.algo_dir / sp.RELOC_MONITOR_LOG).resolve())
+    # session-B only: the map run did not use it
+    assert a.validate(SensorMode.STEREO, ds, ctx.settings) == []
+
+
+@pytest.mark.parametrize("bad", [{"reloc_monitor": True}, {"reloc_monitor": 1},
+                                 {"reloc_monitor_period": 0}, {"reloc_monitor_max_dev_m": 0},
+                                 {"reloc_monitor_max_vo_s": -1.0}])
+def test_rejected_reloc_monitor_settings(tmp_path, bad):
+    with pytest.raises(ValueError):
+        _ctx(tmp_path, bad)
+
+
+def test_legacy_r6_image_runs_patch_0008_but_not_the_monitor(tmp_path, monkeypatch):
+    r6 = "c9516337cbad1d13b52bb9afbf7e24c6d637be36"
+    assert r6 in sp.LEGACY_DRIVER_SOURCE_SHA1 and sp.driver_source_sha1() != r6
+
+    class R:
+        returncode = 0
+        stdout = f"spslam3_commit={sp.SPSLAM3_COMMIT}\ndriver_source_sha1={r6}\n"
+
+    def run(cmd, **kw):
+        if cmd[0] == "nvidia-smi":
+            raise FileNotFoundError("nvidia-smi")
+        return R()
+    monkeypatch.setattr(sp.subprocess, "run", run)
+    mrun = _mapping_run(tmp_path, {"global_descriptors": True, "sp_unit_descriptors": True})
+    base = {"load_map": str(mrun), "learned_reloc": True, "sp_unit_descriptors": True, "map_anchor": True}
+    a, ds, ctx = _ctx(tmp_path, base)
+    a.options["apptainer"] = "apptainer"
+    assert "r6" in a.version_info()["legacy_driver_source"]
+    assert a.validate(SensorMode.STEREO, ds, ctx.settings) == []
+    problems = a.validate(SensorMode.STEREO, ds, a.resolve_settings({**base, "reloc_monitor": True}))
+    assert len(problems) == 1 and "patch 0009" in problems[0]
+
+
+def test_summarize_reloc_monitor_log(tmp_path):
+    p = tmp_path / sp.RELOC_MONITOR_LOG
+    p.write_text("timestamp,frame_id,trigger,tracked_inliers,verified,verified_inliers,dev_m,dev_deg,decision,"
+                 "local_inliers,since_verified_s,ms\n"
+                 "1.0,10,period,300,vpr,120,0.5,0.4,agree,0,0.000,250.0\n"
+                 "2.0,25,period,280,prior,90,6.0,4.0,reset,150,0.000,270.0\n"
+                 "3.0,40,period,200,0,30,-1,-1,unverified,0,1.000,240.0\n"
+                 "4.0,41,unverified_timeout,200,0,0,-1,-1,lost,0,2.000,0.1\n")
+    out = sp.summarize_reloc_monitor(p)
+    assert out["n_checks"] == 3 and out["n_verified"] == 2 and out["n_verified_by_prior"] == 1
+    assert out["n_reset"] == 1 and out["n_agree"] == 1 and out["n_unverified"] == 1 and out["n_lost"] == 1
+    assert out["verified_dev_m"]["max"] == pytest.approx(6.0)

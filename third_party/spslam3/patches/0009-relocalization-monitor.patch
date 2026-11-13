@@ -1,0 +1,285 @@
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 8937b87..3d26c1c 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -167,6 +167,35 @@ public:
+     bool MapAnchor();
+     cv::Mat SlambenchLightGlueDescriptors(KeyFrame* pKF);
+ 
++    // slam-benching patch (relocalization monitor). In localization mode, tracking against the map
++    // can stay "OK" with hundreds of map-point inliers while the pose slides away from the truth
++    // (seen on aerial sequences at 60 m, where the pose drifts along the rotation/translation
++    // ambiguity of a distant, nearly planar scene). With mbRelocMonitor, every mnRelocMonitorPeriod-th
++    // map-tracked frame is re-verified by LearnedRelocalization() (candidates: MixVPR top-K plus the K
++    // keyframes nearest to the tracked pose; same verification and inlier gate, no consistency gate)
++    // without changing the tracking state. If the verified pose differs from the tracked one by more
++    // than mfRelocMonitorMaxDevM m or mfRelocMonitorMaxDevDeg deg, the frame is reset to the verified
++    // pose (TrackLocalMap() from it; counted as a relocalization) or declared lost if that fails. Optionally (0 = off) a frame is declared lost
++    // when VO-only tracking lasts more than mfRelocMonitorMaxVOs s, or when no verification or
++    // relocalization succeeded for more than mfRelocMonitorMaxUnverifiedS s. Checks and decisions are
++    // logged to mRelocMonitorLog (RelocMonitor.logFile).
++    bool mbRelocMonitor = false;
++    int mnRelocMonitorPeriod = 15;
++    float mfRelocMonitorMaxDevM = 3.0f;
++    float mfRelocMonitorMaxDevDeg = 3.0f;
++    float mfRelocMonitorMaxVOs = 0.0f;
++    float mfRelocMonitorMaxUnverifiedS = 0.0f;
++    std::ofstream mRelocMonitorLog;
++    bool RelocMonitor(bool bOK);
++    bool mbRelocMonitorProbe = false;      // LearnedRelocalization() as a check: no gate state, no reloc
++    bool mbRelocMonitorReset = false;      // this frame was reset to a verified pose
++    cv::Mat mRelocMonitorTrackedTcw;       // tracked pose before the reset (motion model)
++    int mnRelocMonitorSinceCheck = 0;
++    int mnLearnedRelocLastInliers = 0;
++    bool mbLearnedRelocLastPrior = false;  // best candidate came from the pose prior, not retrieval
++    double mdRelocMonitorLastVerified = -1.0;
++    double mdRelocMonitorVOStart = -1.0;
++
+     // Tracking states
+     enum eTrackingState{
+         SYSTEM_NOT_READY=-1,
+diff --git a/src/System.cc b/src/System.cc
+index 4d43d01..3981940 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -329,6 +329,33 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+                 "dist_to_prev,angle_to_prev,tx,ty,tz,qx,qy,qz,qw\n";
+         }
+     }
++    // slam-benching patch (relocalization monitor), see Tracking.h.
++    cv::FileNode rmNode = fsSettings["RelocMonitor.enable"];
++    if (!rmNode.empty() && (int)rmNode != 0)
++    {
++        Tracking* pT = mpTracker;
++        if (!pT->mbLearnedReloc)
++        {
++            cerr << "RelocMonitor.enable requires LearnedReloc.enable" << endl;
++            exit(-1);
++        }
++        pT->mbRelocMonitor = true;
++        if (!fsSettings["RelocMonitor.period"].empty()) pT->mnRelocMonitorPeriod = (int)fsSettings["RelocMonitor.period"];
++        if (!fsSettings["RelocMonitor.maxDevM"].empty()) pT->mfRelocMonitorMaxDevM = (float)fsSettings["RelocMonitor.maxDevM"];
++        if (!fsSettings["RelocMonitor.maxDevDeg"].empty()) pT->mfRelocMonitorMaxDevDeg = (float)fsSettings["RelocMonitor.maxDevDeg"];
++        if (!fsSettings["RelocMonitor.maxVOs"].empty()) pT->mfRelocMonitorMaxVOs = (float)fsSettings["RelocMonitor.maxVOs"];
++        if (!fsSettings["RelocMonitor.maxUnverifiedS"].empty()) pT->mfRelocMonitorMaxUnverifiedS = (float)fsSettings["RelocMonitor.maxUnverifiedS"];
++        cout << "Relocalization monitor: every " << pT->mnRelocMonitorPeriod << " tracked frames, max deviation "
++             << pT->mfRelocMonitorMaxDevM << " m / " << pT->mfRelocMonitorMaxDevDeg << " deg, max VO-only "
++             << pT->mfRelocMonitorMaxVOs << " s, max unverified " << pT->mfRelocMonitorMaxUnverifiedS << " s (0 = off)" << endl;
++        cv::FileNode logNode = fsSettings["RelocMonitor.logFile"];
++        if (!logNode.empty() && !((string)logNode).empty())
++        {
++            pT->mRelocMonitorLog.open((string)logNode);
++            pT->mRelocMonitorLog << "timestamp,frame_id,trigger,tracked_inliers,verified,verified_inliers,"
++                "dev_m,dev_deg,decision,local_inliers,since_verified_s,ms\n";
++        }
++    }
+ 
+     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
+ 
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 63a8b9f..e25548a 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -1416,6 +1416,7 @@ void Tracking::Track()
+ #endif
+     framecount++;
+     mbRelocalizedThisFrame = false;  // slam-benching patch
++    mbRelocMonitorReset = false;  // slam-benching patch (relocalization monitor)
+     if (bStepByStep)
+     {
+         while(!mbStep)
+@@ -1772,6 +1773,8 @@ void Tracking::Track()
+             }
+             if(bOK && !mbVO && !bAnchored)
+                 bOK = TrackLocalMap();
++            if(mbRelocMonitor)
++                bOK = RelocMonitor(bOK);  // slam-benching patch (relocalization monitor)
+         }
+ 
+         if(bOK)
+@@ -1841,7 +1844,9 @@ void Tracking::Track()
+                 cv::Mat LastTwc = cv::Mat::eye(4,4,CV_32F);
+                 mLastFrame.GetRotationInverse().copyTo(LastTwc.rowRange(0,3).colRange(0,3));
+                 mLastFrame.GetCameraCenter().copyTo(LastTwc.rowRange(0,3).col(3));
+-                mVelocity = mCurrentFrame.mTcw*LastTwc;
++                // slam-benching patch (relocalization monitor): after a reset to a verified pose the
++                // motion model keeps the tracked frame-to-frame motion.
++                mVelocity = (mbRelocMonitorReset ? mRelocMonitorTrackedTcw : mCurrentFrame.mTcw)*LastTwc;
+             }
+             else
+                 mVelocity = cv::Mat();
+@@ -4014,6 +4019,25 @@ bool Tracking::LearnedRelocalization()
+             vSims.push_back(vals[i].item<float>());
+         }
+     }
++    // slam-benching patch (relocalization monitor): a monitor check also verifies against the K keyframes
++    // nearest to the tracked pose with a similar viewing direction (the pose is still estimated from scratch).
++    if(mbRelocMonitorProbe && !mCurrentFrame.mTcw.empty())
++    {
++        cv::Mat Rwc = mCurrentFrame.mTcw.rowRange(0,3).colRange(0,3).t();
++        cv::Mat Ow = -Rwc*mCurrentFrame.mTcw.rowRange(0,3).col(3);
++        cv::Mat zw = Rwc.col(2);
++        vector<pair<float,KeyFrame*> > vDistKF;
++        for(KeyFrame* pKF : vpAllKFs)
++            if(!pKF->isBad() && pKF->GetPose().rowRange(0,3).colRange(0,3).row(2).dot(zw.t()) >= std::cos(CV_PI / 4))
++                vDistKF.push_back(make_pair((float)cv::norm(pKF->GetCameraCenter() - Ow), pKF));
++        sort(vDistKF.begin(), vDistKF.end(), [](const pair<float,KeyFrame*> &a, const pair<float,KeyFrame*> &b) { return a.first < b.first; });
++        for(int i = 0; i < (int)vDistKF.size() && i < mnLearnedRelocTopK; i++)
++            if(std::find(vpCandidateKFs.begin(), vpCandidateKFs.end(), vDistKF[i].second) == vpCandidateKFs.end())
++            {
++                vpCandidateKFs.push_back(vDistKF[i].second);
++                vSims.push_back(-1.f);
++            }
++    }
+     const clk::time_point t2 = clk::now();
+ 
+     // 3. Verification of every candidate; the one with the most final inliers is kept.
+@@ -4151,7 +4175,9 @@ bool Tracking::LearnedRelocalization()
+     // 4. Inlier gate and temporal consistency.
+     const bool bAccepted = bestIdx >= 0 && bestGood >= minInl;
+     float dDist = -1.f, dAng = -1.f;
+-    if(bAccepted)
++    if(mbRelocMonitorProbe)
++        ;  // a monitor check leaves the consistency gate alone
++    else if(bAccepted)
+     {
+         if(mnRelocPendingCount > 0 && mCurrentFrame.mnId == mnRelocPendingFrameId + 1)
+         {
+@@ -4168,7 +4194,9 @@ bool Tracking::LearnedRelocalization()
+     }
+     else
+         mnRelocPendingCount = 0;
+-    const bool bConfirmed = bAccepted && mnRelocPendingCount >= mnLearnedRelocConsistentFrames;
++    const bool bConfirmed = bAccepted && (mbRelocMonitorProbe || mnRelocPendingCount >= mnLearnedRelocConsistentFrames);
++    mnLearnedRelocLastInliers = bestIdx >= 0 ? bestGood : 0;
++    mbLearnedRelocLastPrior = bestIdx >= 0 && vSims[bestIdx] < 0;
+ 
+     if(bConfirmed)
+     {
+@@ -4179,7 +4207,7 @@ bool Tracking::LearnedRelocalization()
+     else
+         fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(), static_cast<MapPoint*>(NULL));
+ 
+-    if(mLearnedRelocLog.is_open())
++    if(mLearnedRelocLog.is_open() && !mbRelocMonitorProbe)  // monitor checks: reloc_monitor.csv
+     {
+         auto join = [](const auto &v, auto f) {
+             std::ostringstream o;
+@@ -4210,8 +4238,8 @@ bool Tracking::LearnedRelocalization()
+         mLearnedRelocLog.flush();
+     }
+ 
+-    if(!bConfirmed)
+-        return false;
++    if(!bConfirmed || mbRelocMonitorProbe)
++        return bConfirmed;
+     mnRelocPendingCount = 0;
+     mnLastRelocFrameId = mCurrentFrame.mnId;
+     mbRelocalizedThisFrame = true;
+@@ -4370,6 +4398,106 @@ bool Tracking::MapAnchor()
+     return bOK;
+ }
+ 
++// slam-benching patch (relocalization monitor), see Tracking.h. Called after tracking in localization
++// mode; returns whether the frame stays tracked.
++bool Tracking::RelocMonitor(bool bOK)
++{
++    typedef std::chrono::steady_clock clk;
++    const clk::time_point t0 = clk::now();
++    const double t = mCurrentFrame.mTimeStamp;
++    if(!bOK)
++    {
++        mdRelocMonitorVOStart = -1.0;
++        return false;
++    }
++    if(mbRelocalizedThisFrame || mdRelocMonitorLastVerified < 0)
++    {
++        mdRelocMonitorLastVerified = t;
++        mnRelocMonitorSinceCheck = 0;
++    }
++    if(!mbVO)
++        mdRelocMonitorVOStart = -1.0;
++    else if(mdRelocMonitorVOStart < 0)
++        mdRelocMonitorVOStart = t;
++
++    std::string trigger, decision;
++    const int trackedInl = mbVO ? 0 : mnMatchesInliers;
++    int localInl = 0;
++    bool bVerified = false;
++    float dDist = -1.f, dAng = -1.f;
++
++    // 1. Periodic re-verification of a map-tracked frame (VO-only frames already try to relocalize).
++    if(!mbVO && !mbRelocalizedThisFrame && ++mnRelocMonitorSinceCheck >= mnRelocMonitorPeriod)
++    {
++        trigger = "period";
++        mnRelocMonitorSinceCheck = 0;
++        const cv::Mat TcwT = mCurrentFrame.mTcw.clone();
++        const vector<MapPoint*> vpMPsT = mCurrentFrame.mvpMapPoints;
++        const vector<bool> vbOutT = mCurrentFrame.mvbOutlier;
++        const int nInlT = mnMatchesInliers;
++        mbRelocMonitorProbe = true;
++        bVerified = LearnedRelocalization();
++        mbRelocMonitorProbe = false;
++        if(bVerified)
++        {
++            mdRelocMonitorLastVerified = t;
++            SlambenchPoseDiff(TcwT, mCurrentFrame.mTcw, dDist, dAng);
++        }
++        if(bVerified && (dDist > mfRelocMonitorMaxDevM || dAng > mfRelocMonitorMaxDevDeg))
++        {
++            // Reset to the verified pose and track the local map from it, as after a relocalization.
++            mnLastRelocFrameId = mCurrentFrame.mnId;
++            bOK = TrackLocalMap();
++            localInl = mnMatchesInliers;
++            decision = bOK ? "reset" : "reset_lost";
++            if(bOK)
++            {
++                mbRelocalizedThisFrame = true;
++                mbRelocMonitorReset = true;
++                mRelocMonitorTrackedTcw = TcwT;
++            }
++        }
++        else
++        {
++            mCurrentFrame.SetPose(TcwT);
++            mCurrentFrame.mvpMapPoints = vpMPsT;
++            mCurrentFrame.mvbOutlier = vbOutT;
++            mnMatchesInliers = nInlT;
++            decision = bVerified ? "agree" : "unverified";
++        }
++    }
++
++    // 2. Optional budgets: VO-only for too long, or no verified pose for too long.
++    if(bOK && !mbRelocalizedThisFrame)
++    {
++        const char* lost = NULL;
++        if(mbVO && mfRelocMonitorMaxVOs > 0 && t - mdRelocMonitorVOStart > mfRelocMonitorMaxVOs)
++            lost = "vo_timeout";
++        else if(mfRelocMonitorMaxUnverifiedS > 0 && t - mdRelocMonitorLastVerified > mfRelocMonitorMaxUnverifiedS)
++            lost = "unverified_timeout";
++        if(lost)
++        {
++            trigger = trigger.empty() ? lost : trigger + "+" + lost;
++            decision = "lost";
++            bOK = false;
++        }
++    }
++    if(!bOK)
++        mdRelocMonitorVOStart = -1.0;
++
++    if(mRelocMonitorLog.is_open() && !trigger.empty())
++    {
++        mRelocMonitorLog << std::fixed << std::setprecision(9) << t << "," << mCurrentFrame.mnId << "," << trigger << ","
++            << trackedInl << "," << (bVerified ? (mbLearnedRelocLastPrior ? "prior" : "vpr") : "0") << ","
++            << (trigger.rfind("period", 0) == 0 ? mnLearnedRelocLastInliers : 0) << ","
++            << std::setprecision(4) << dDist << "," << dAng << "," << decision << "," << localInl << ","
++            << std::setprecision(3) << t - mdRelocMonitorLastVerified << ","
++            << std::setprecision(1) << std::chrono::duration<double, std::milli>(clk::now() - t0).count() << "\n";
++        mRelocMonitorLog.flush();
++    }
++    return bOK;
++}
++
+ void Tracking::SetRelocalizeOnly(const bool &flag)
+ {
+     mbRelocOnly = flag;

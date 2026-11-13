@@ -132,6 +132,9 @@ _FREE_SETTINGS = {"save_map", "load_map", "reuse_mode", "playback_rate", "log_fe
                   "map_anchor", "map_anchor_k", "map_anchor_min_inliers", "map_anchor_period",
                   "map_anchor_max_kf_dist", "map_anchor_max_kf_angle_deg", "map_anchor_max_correction",
                   "map_anchor_max_correction_deg",
+                  # spslam3 relocalization monitor (session B only)
+                  "reloc_monitor", "reloc_monitor_period", "reloc_monitor_max_dev_m", "reloc_monitor_max_dev_deg",
+                  "reloc_monitor_max_vo_s", "reloc_monitor_max_unverified_s",
                   # spslam3 matcher thresholds and keyframe policy: not stored in the map
                   # (sp_unit_descriptors / sp_bow_descriptor_scale change the stored descriptors and must match)
                   "sp_th_low", "sp_th_high", "kf_close_tracked", "kf_close_non_tracked", "kf_ref_ratio",

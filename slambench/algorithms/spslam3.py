@@ -40,6 +40,15 @@ unchanged):
   normalizes each descriptor channel over the image's keypoints instead of each descriptor, which
   leaves an image-dependent per-channel scale that LightGlue cannot match across lighting. The
   spslam3_9439971_r4.sif image always behaves as ``false``.
+
+Relocalization monitor (patch 0009; off by default): ``reloc_monitor: true`` (needs ``learned_reloc``)
+re-verifies every ``reloc_monitor_period``-th map-tracked frame of session B with the learned
+relocalization's verification (candidates: the MixVPR top-K plus the K keyframes nearest to the tracked
+pose; no consistency gate). When the verified pose differs from the
+tracked one by more than ``reloc_monitor_max_dev_m`` m or ``reloc_monitor_max_dev_deg`` deg, the frame is
+reset to the verified pose (counted as a relocalization) or declared lost. ``reloc_monitor_max_vo_s`` /
+``reloc_monitor_max_unverified_s`` (0 = off) declare a frame lost after that long in VO-only tracking /
+without a verified pose. Every check is logged to ``algorithm/reloc_monitor.csv``.
 """
 
 from __future__ import annotations
@@ -83,13 +92,19 @@ LEGACY_DRIVER_SOURCE_SHA1 = {
                                                 "descriptor recovery of the LightGlue verifier",
     "9be049ce57cce22a2e59d986c38c09fc1f0c4fca": "spslam3_9439971_r5.sif: before the descriptor fix, keyframe "
                                                 "density and map anchoring settings (patch 0008)",
+    "c9516337cbad1d13b52bb9afbf7e24c6d637be36": "spslam3_9439971_r6.sif: before the relocalization monitor "
+                                                "(patch 0009)",
 }
 # Legacy images that already have map reuse (patch 0006); they only lack the learned-relocalization settings.
 MAP_REUSE_LEGACY_DRIVER_SOURCE_SHA1 = {"3fc07c4b60ad6e1c5564bfa178fd55fe19e831c6",
                                        "af171357f101d83cf7599de2665aa54b6ed77050",
-                                       "9be049ce57cce22a2e59d986c38c09fc1f0c4fca"}
+                                       "9be049ce57cce22a2e59d986c38c09fc1f0c4fca",
+                                       "c9516337cbad1d13b52bb9afbf7e24c6d637be36"}
 # Legacy images with the current learned relocalization (patch 0007); they only lack the patch-0008 settings.
-LEARNED_RELOC_LEGACY_DRIVER_SOURCE_SHA1 = {"9be049ce57cce22a2e59d986c38c09fc1f0c4fca"}
+LEARNED_RELOC_LEGACY_DRIVER_SOURCE_SHA1 = {"9be049ce57cce22a2e59d986c38c09fc1f0c4fca",
+                                           "c9516337cbad1d13b52bb9afbf7e24c6d637be36"}
+# Legacy images with patch 0008; they only lack the relocalization monitor (patch 0009).
+SP_FIX_LEGACY_DRIVER_SOURCE_SHA1 = {"c9516337cbad1d13b52bb9afbf7e24c6d637be36"}
 # Legacy images with learned relocalization that always behave as learned_reloc_recover_descriptors: false.
 LEARNED_RELOC_NO_RECOVERY_DRIVER_SOURCE_SHA1 = {"af171357f101d83cf7599de2665aa54b6ed77050"}
 
@@ -178,6 +193,17 @@ SP_FIX_DEFAULTS: Dict[str, Any] = {
 SP_UNIT_TH_LOW = 0.52
 SP_UNIT_TH_HIGH = 1.19
 MAP_ANCHOR_LOG = "map_anchor.csv"
+
+# Relocalization monitor (patch 0009); added to the resolved settings only when used.
+RELOC_MONITOR_DEFAULTS: Dict[str, Any] = {
+    "reloc_monitor": False,
+    "reloc_monitor_period": 15,            # re-verify every N-th map-tracked frame
+    "reloc_monitor_max_dev_m": 3.0,        # verified vs tracked pose: reset above this deviation
+    "reloc_monitor_max_dev_deg": 3.0,
+    "reloc_monitor_max_vo_s": 0.0,         # declare lost after this long VO-only (0 = off)
+    "reloc_monitor_max_unverified_s": 0.0,  # declare lost after this long without a verified pose (0 = off)
+}
+RELOC_MONITOR_LOG = "reloc_monitor.csv"
 
 
 def sp_fix_effective(s: Dict[str, Any]) -> Dict[str, Any]:
@@ -271,6 +297,59 @@ def summarize_map_anchor(path: Path) -> Dict[str, Any]:
     return out
 
 
+def resolve_reloc_monitor_settings(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the relocalization-monitor settings of a resolved settings dict (in place)."""
+    if not isinstance(out["reloc_monitor"], bool):
+        raise ValueError(f"reloc_monitor must be true or false, got {out['reloc_monitor']!r}")
+    v = out["reloc_monitor_period"]
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise ValueError(f"reloc_monitor_period must be an integer >= 1, got {v!r}")
+    for k in ("reloc_monitor_max_dev_m", "reloc_monitor_max_dev_deg", "reloc_monitor_max_vo_s",
+              "reloc_monitor_max_unverified_s"):
+        v, positive = out[k], "_dev_" in k
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (v > 0 if positive else v >= 0):
+            raise ValueError(f"{k} must be a number {'> 0' if positive else '>= 0'}, got {v!r}")
+    if out["reloc_monitor"] and not out.get("learned_reloc"):
+        raise ValueError("reloc_monitor needs learned_reloc: true")
+    return out
+
+
+def reloc_monitor_yaml_lines(s: Dict[str, Any], algo_dir: Path) -> List[str]:
+    """RelocMonitor.* keys of the settings file; empty when unused."""
+    if not s.get("reloc_monitor"):
+        return []
+    return ["RelocMonitor.enable: 1",
+            f"RelocMonitor.period: {int(s['reloc_monitor_period'])}",
+            f"RelocMonitor.maxDevM: {_positional(s['reloc_monitor_max_dev_m'])}",
+            f"RelocMonitor.maxDevDeg: {_positional(s['reloc_monitor_max_dev_deg'])}",
+            f"RelocMonitor.maxVOs: {_positional(s['reloc_monitor_max_vo_s'])}",
+            f"RelocMonitor.maxUnverifiedS: {_positional(s['reloc_monitor_max_unverified_s'])}",
+            f'RelocMonitor.logFile: "{(Path(algo_dir).resolve() / RELOC_MONITOR_LOG)}"']
+
+
+def summarize_reloc_monitor(path: Path) -> Dict[str, Any]:
+    """Summary of the driver's relocalization-monitor log (reloc_monitor.csv)."""
+    import csv
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    checks = [r for r in rows if r["trigger"].startswith("period")]
+    # verified: 0, or the candidate source of the verified pose (vpr = MixVPR retrieval, prior = nearest
+    # keyframes to the tracked pose)
+    verified = [r for r in checks if r["verified"] != "0"]
+    out: Dict[str, Any] = {"n_rows": len(rows), "n_checks": len(checks), "n_verified": len(verified),
+                           "n_verified_by_prior": sum(r["verified"] == "prior" for r in verified)}
+    for d in ("agree", "unverified", "reset", "reset_lost", "lost"):
+        out[f"n_{d}"] = sum(r["decision"] == d for r in rows)
+    dev = np.array([float(r["dev_m"]) for r in verified])
+    if dev.size:
+        out["verified_dev_m"] = {"median": float(np.median(dev)), "p90": float(np.percentile(dev, 90)),
+                                 "max": float(dev.max())}
+    if checks:
+        msv = np.array([float(r["ms"]) for r in checks])
+        out["check_ms"] = {"median": float(np.median(msv)), "p95": float(np.percentile(msv, 95))}
+    return out
+
+
 def resolve_learned_reloc_settings(out: Dict[str, Any]) -> Dict[str, Any]:
     """Validate the learned-relocalization settings of a resolved settings dict (in place)."""
     for k in ("global_descriptors", "learned_reloc", "learned_reloc_recover_descriptors"):
@@ -352,7 +431,7 @@ class SpSlam3Adapter(OrbSlam3Adapter):
 
     def resolve_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         unknown = (set(settings) - set(DEFAULT_SETTINGS) - set(mr.MAP_REUSE_DEFAULTS)
-                   - set(LEARNED_RELOC_DEFAULTS) - set(SP_FIX_DEFAULTS))
+                   - set(LEARNED_RELOC_DEFAULTS) - set(SP_FIX_DEFAULTS) - set(RELOC_MONITOR_DEFAULTS))
         if unknown:
             raise ValueError(f"unknown spslam3 settings: {sorted(unknown)}")
         out = dict(DEFAULT_SETTINGS)
@@ -364,6 +443,8 @@ class SpSlam3Adapter(OrbSlam3Adapter):
             out.update(LEARNED_RELOC_DEFAULTS)
         if set(settings) & set(SP_FIX_DEFAULTS):
             out.update(SP_FIX_DEFAULTS)
+        if set(settings) & set(RELOC_MONITOR_DEFAULTS):
+            out.update(RELOC_MONITOR_DEFAULTS)
         out.update(settings)
         if set(settings) & set(mr.MAP_REUSE_DEFAULTS):
             mr.resolve_map_reuse_settings(out)
@@ -371,6 +452,8 @@ class SpSlam3Adapter(OrbSlam3Adapter):
             resolve_learned_reloc_settings(out)
         if set(settings) & set(SP_FIX_DEFAULTS):
             resolve_sp_fix_settings(out)
+        if set(settings) & set(RELOC_MONITOR_DEFAULTS):
+            resolve_reloc_monitor_settings(out)
         if out["loop_closure"] is not True:
             raise ValueError("SP_SLAM3 cannot disable loop closing; loop_closure must be true")
         for k in ("sp_n_features", "sp_n_levels", "clahe_tile_grid"):
@@ -411,11 +494,17 @@ class SpSlam3Adapter(OrbSlam3Adapter):
         return problems
 
     def _sp_fix_validate(self, settings) -> List[str]:
+        problems = []
+        legacy = getattr(self, "_legacy_driver", None)
         used = [k for k in SP_FIX_DEFAULTS if k in settings and settings[k] != SP_FIX_DEFAULTS[k]]
-        if used and getattr(self, "_legacy_driver", None):
-            return [f"{', '.join(used)} need an image built with patch 0008; {self.container} is "
-                    f"{self._legacy_driver}"]
-        return []
+        if used and legacy and getattr(self, "_legacy_driver_sha1", None) not in SP_FIX_LEGACY_DRIVER_SOURCE_SHA1:
+            problems.append(f"{', '.join(used)} need an image built with patch 0008; {self.container} is "
+                            f"{legacy}")
+        used = [k for k in RELOC_MONITOR_DEFAULTS if k in settings and settings[k] != RELOC_MONITOR_DEFAULTS[k]]
+        if used and legacy:
+            problems.append(f"{', '.join(used)} need an image built with patch 0009; {self.container} is "
+                            f"{legacy}")
+        return problems
 
     def _map_reuse_validate(self, mode, settings) -> List[str]:
         legacy = getattr(self, "_legacy_driver", None)
@@ -527,6 +616,7 @@ class SpSlam3Adapter(OrbSlam3Adapter):
         lines += mr.settings_yaml_lines(s, ctx.algo_dir)
         lines += learned_reloc_yaml_lines(s, ctx.algo_dir)
         lines += sp_fix_yaml_lines(s, ctx.algo_dir)
+        lines += reloc_monitor_yaml_lines(s, ctx.algo_dir)
         return "\n".join(lines) + "\n"
 
     def prepare(self, ctx: RunContext) -> None:
@@ -550,6 +640,13 @@ class SpSlam3Adapter(OrbSlam3Adapter):
                 out.extra["map_anchor"] = summarize_map_anchor(log)
             except Exception as exc:  # noqa: BLE001 - diagnostics only; never fail collection
                 out.extra["map_anchor"] = {"error": f"{type(exc).__name__}: {exc}"}
+        log = ctx.algo_dir / RELOC_MONITOR_LOG
+        if ctx.settings.get("reloc_monitor") and log.exists():
+            out.artifacts["reloc_monitor"] = log
+            try:
+                out.extra["reloc_monitor"] = summarize_reloc_monitor(log)
+            except Exception as exc:  # noqa: BLE001 - diagnostics only; never fail collection
+                out.extra["reloc_monitor"] = {"error": f"{type(exc).__name__}: {exc}"}
         return out
 
     def command(self, ctx: RunContext) -> List[str]:
